@@ -1,0 +1,56 @@
+node_modules
+.env
+npm-debug.log
+node_modules/
+dist/
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editor directories and files      
+.idea
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln   
+# --- Environnement et Secrets (CRITIQUE) ---
+.env
+.env.local
+.env.*.local
+*.env
+
+# --- Sessions et Cache WhatsApp (Spécifique à ton projet) ---
+.wwebjs_auth/
+.wwebjs_cache/
+Chromium/
+.puppeteer_executable_cache/
+
+# --- Dépendances Node.js ---
+node_modules/
+/npm-debug.log*
+/yarn-error.log*
+/yarn-debug.log*
+/pnpm-debug.log*
+
+# --- Fichiers Logs applicatifs ---
+logs/
+*.log
+npm-debug.log*
+
+# --- Système et IDE ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
