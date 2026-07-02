@@ -4,6 +4,7 @@ import { MongoStore } from "wwebjs-mongo";
 import mongoose from "mongoose";
 import qrcode from "qrcode";
 import { log } from "../utils/logger.js";
+
 const clients = new Map();
 
 const STATUSES = {
@@ -18,69 +19,67 @@ const STATUSES = {
  * Retourne ou crée le client WA pour un userId
  */
 export const getOrCreateClient = async (userId, io) => {
-  if (clients.has(userId)) return clients.get(userId);
+  const sUserId = userId.toString(); // Force la clé en string pur
+
+  if (clients.has(sUserId)) return clients.get(sUserId);
 
   const store = new MongoStore({ mongoose });
-
-  // ✅ CORRIGÉ : On extrait RemoteAuth proprement depuis notre constante pkg du haut
   const { RemoteAuth } = pkg;
 
   const client = new Client({
     authStrategy: new RemoteAuth({
-      clientId: userId,
+      clientId: sUserId,
       store,
       backupSyncIntervalMs: 300_000,
     }),
     puppeteer: {
       headless: true,
       args: [
-        "--no-sandbox",
+     "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--ipv4-first", // <-- Recommandé pour éviter tout freeze DNS résiduel lors de la sync
       ],
     },
   });
 
   const state = { client, status: STATUSES.INITIALIZING, qr: null };
-  clients.set(userId, state);
+  clients.set(sUserId, state);
 
   // --- Events ---
   client.on("qr", async (qr) => {
     const qrImage = await qrcode.toDataURL(qr);
     state.status = STATUSES.QR_READY;
     state.qr = qrImage;
-    io?.to(`user:${userId}`).emit("wa:qr", { qr: qrImage });
-    await log("info", "QR code généré, scan requis", { userId });
+    io?.to(`user:${sUserId}`).emit("wa:qr", { qr: qrImage });
+    await log("info", "QR code généré, scan requis", { userId: sUserId });
   });
 
   client.on("loading_screen", () => {
     state.status = STATUSES.LOADING;
-    io?.to(`user:${userId}`).emit("wa:status", { status: STATUSES.LOADING });
+    io?.to(`user:${sUserId}`).emit("wa:status", { status: STATUSES.LOADING });
   });
 
   client.on("authenticated", () => {
     state.qr = null;
-    io?.to(`user:${userId}`).emit("wa:status", { status: "authenticated" });
-    log("success", "WhatsApp authentifié", { userId });
+    io?.to(`user:${sUserId}`).emit("wa:status", { status: "authenticated" });
+    log("success", "WhatsApp authentifié", { userId: sUserId });
   });
 
   client.on("ready", () => {
     state.status = STATUSES.CONNECTED;
-    io?.to(`user:${userId}`).emit("wa:status", { status: STATUSES.CONNECTED });
-    log("success", "WhatsApp connecté et prêt", { userId });
+    io?.to(`user:${sUserId}`).emit("wa:status", { status: STATUSES.CONNECTED });
+    log("success", "WhatsApp connecté et prêt", { userId: sUserId });
   });
 
   client.on("disconnected", async (reason) => {
     state.status = STATUSES.DISCONNECTED;
     state.qr = null;
-    io?.to(`user:${userId}`).emit("wa:status", {
+    io?.to(`user:${sUserId}`).emit("wa:status", {
       status: STATUSES.DISCONNECTED,
       reason,
     });
-    await log("warn", `WhatsApp déconnecté : ${reason}`, { userId });
-    clients.delete(userId);
+    await log("warn", `WhatsApp déconnecté : ${reason}`, { userId: sUserId });
+    clients.delete(sUserId);
   });
 
   await client.initialize();
@@ -91,7 +90,14 @@ export const getOrCreateClient = async (userId, io) => {
  * Publie un statut WhatsApp (texte + image optionnelle)
  */
 export const publishStatus = async (userId, { text, imageUrl }) => {
-  const state = clients.get(userId);
+  const sUserId = userId.toString(); // Force la recherche en string
+
+  // Debug log pour voir l'état réel de ta Map en console
+  console.log("--- Tentative de publication ---");
+  console.log("ID recherché :", sUserId);
+  console.log("Clients en mémoire :", Array.from(clients.keys()));
+
+  const state = clients.get(sUserId);
   if (!state || state.status !== STATUSES.CONNECTED) {
     throw new Error("Client WhatsApp non connecté");
   }
@@ -105,27 +111,29 @@ export const publishStatus = async (userId, { text, imageUrl }) => {
     await client.sendMessage("status@broadcast", text);
   }
 
-  await log("success", "Statut WhatsApp publié", { userId });
+  await log("success", "Statut WhatsApp publié", { userId: sUserId });
 };
 
 /**
  * Déconnecte et détruit le client d'un user
  */
 export const destroyClient = async (userId) => {
-  const state = clients.get(userId);
+  const sUserId = userId.toString();
+  const state = clients.get(sUserId);
   if (!state) return;
   try {
     await state.client.destroy();
   } catch {}
-  clients.delete(userId);
-  await log("info", "Client WhatsApp détruit", { userId });
+  clients.delete(sUserId);
+  await log("info", "Client WhatsApp détruit", { userId: sUserId });
 };
 
 /**
  * Statut courant d'un user
  */
 export const getClientStatus = (userId) => {
-  const state = clients.get(userId);
+  const sUserId = userId.toString();
+  const state = clients.get(sUserId);
   if (!state) return { status: STATUSES.DISCONNECTED, qr: null };
   return { status: state.status, qr: state.qr };
 };

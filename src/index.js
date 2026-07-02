@@ -21,21 +21,42 @@ import { log } from "./utils/logger.js";
 const app = express();
 const httpServer = createServer(app);
 
+// --- Configuration des Origines CORS (Express & Socket.io) ---
+const allowedOrigins = process.env.FRONTEND_URL
+  ? process.env.FRONTEND_URL.split(",").map((url) =>
+      url.trim().replace(/\/$/, ""),
+    )
+  : ["http://localhost:5173"];
+
+// Middleware CORS pour Express
 app.use(
   cors({
-    origin: "http://localhost:5173", // Met l'URL exacte de ton Vite au lieu de "*" pour être tranquille
-    methods: ["GET", "POST", "PATCH", "DELETE", "PUT", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    origin: function (origin, callback) {
+      // Permet les requêtes sans origine (comme Postman ou les tâches planifiées)
+      if (!origin) return callback(null, true);
+
+      const sanitizedOrigin = origin.replace(/\/$/, "");
+
+      if (allowedOrigins.indexOf(sanitizedOrigin) !== -1) {
+        callback(null, true);
+      } else {
+        console.log(`[CORS Bloqué] Origine Express non autorisée : ${origin}`);
+        callback(new Error("Non autorisé par les CORS"));
+      }
+    },
     credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   }),
 );
 
-// 2. Intercepte les requêtes OPTIONS globalement pour y répondre instantanément 200 OK
-// --- Socket.io ---
+// --- Configuration Socket.io ---
+// Socket.io accepte nativement un tableau de chaînes pour les origines !
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.FRONTEND_URL || "*",
+    origin: allowedOrigins,
     methods: ["GET", "POST"],
+    credentials: true,
   },
 });
 
@@ -51,7 +72,7 @@ io.on("connection", (socket) => {
 });
 
 // --- Middlewares ---
-// app.use(helmet());
+// app.use(helmet()); // Désactivé pour le moment si nécessaire
 
 app.use(express.json({ limit: "10mb" }));
 app.use(
@@ -64,7 +85,6 @@ app.use(
 );
 
 // --- Routes ---
-
 app.get("/", (_, res) => res.json({ message: "API WhatsApp Bot" }));
 app.get("/health", (_, res) => res.json({ status: "ok", ts: new Date() }));
 app.use("/api/auth", authRoutes);

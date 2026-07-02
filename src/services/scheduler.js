@@ -2,7 +2,8 @@ import cron from "node-cron";
 import Post from "../models/Post.js";
 import { log } from "../utils/logger.js";
 import { publishStatus } from "./whatsapp.js";
-
+import User from "../models/User.js";
+import { generateFullPost } from "./gemini.js";
 
 /**
  * Calcule une heure aléatoire dans la plage [min, max] pour aujourd'hui
@@ -36,8 +37,12 @@ const generateDraftForUser = async (user) => {
   if (existing) return; // Déjà un post prévu aujourd'hui
 
   try {
-    const { text, theme, prompt, imageUrl, imagePublicId } = await generateFullPost(user);
-    const scheduledAt = randomScheduleToday(user.publishHourMin, user.publishHourMax);
+    const { text, theme, prompt, imageUrl, imagePublicId } =
+      await generateFullPost(user);
+    const scheduledAt = randomScheduleToday(
+      user.publishHourMin,
+      user.publishHourMax,
+    );
 
     await Post.create({
       userId: user._id,
@@ -54,11 +59,17 @@ const generateDraftForUser = async (user) => {
     user.themeIndex = (user.themeIndex + 1) % user.geminiThemes.length;
     await user.save();
 
-    await log("success", `Post généré et schedulé pour ${scheduledAt.toLocaleTimeString("fr-FR")}`, {
+    await log(
+      "success",
+      `Post généré et schedulé pour ${scheduledAt.toLocaleTimeString("fr-FR")}`,
+      {
+        userId: user._id,
+      },
+    );
+  } catch (err) {
+    await log("error", `Génération échouée : ${err.message}`, {
       userId: user._id,
     });
-  } catch (err) {
-    await log("error", `Génération échouée : ${err.message}`, { userId: user._id });
   }
 };
 
@@ -131,8 +142,32 @@ export const manualGenerate = async (userId) => {
   const user = await User.findById(userId);
   if (!user) throw new Error("Utilisateur introuvable");
 
-  const { text, theme, prompt, imageUrl, imagePublicId } = await generateFullPost(user);
-  const scheduledAt = randomScheduleToday(user.publishHourMin, user.publishHourMax);
+  let text, theme, prompt, imageUrl, imagePublicId;
+
+  try {
+    // On tente de générer avec l'IA
+    const aiPost = await generateFullPost(user);
+    text = aiPost.text;
+    theme = aiPost.theme;
+    prompt = aiPost.prompt;
+    imageUrl = aiPost.imageUrl;
+    imagePublicId = aiPost.imagePublicId;
+  } catch (aiError) {
+    console.error(
+      "Gemini API Error, fallback sur un texte de secours:",
+      aiError.message,
+    );
+    // TEXTE DE SECOURS pour que l'utilisateur puisse au moins éditer son post !
+    text =
+      "Nouveau statut en cours de préparation... (L'IA a atteint son quota, écrivez votre texte ici !)";
+    theme = user.geminiThemes[user.themeIndex] || "Général";
+    prompt = "Fallback automatique";
+  }
+
+  const scheduledAt = randomScheduleToday(
+    user.publishHourMin,
+    user.publishHourMax,
+  );
 
   const post = await Post.create({
     userId: user._id,

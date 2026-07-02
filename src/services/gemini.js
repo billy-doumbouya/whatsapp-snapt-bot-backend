@@ -1,21 +1,30 @@
 import { log } from "../utils/logger.js";
-// Assure-toi d'importer cloudinary si ce n'est pas déjà fait globalement
 // import { v2 as cloudinary } from 'cloudinary';
 
 const API_KEY = process.env.GEMINI_API_KEY;
 const BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 
-// Liste des modèles gratuits utilisables pour le texte (par ordre de préférence)
+// ── Modèles TEXTE — free tier confirmé (Flash / Flash-Lite uniquement) ──
 const FREE_TEXT_MODELS = [
-  "gemini-2.0-flash",
-  "gemini-1.5-flash",
-  "gemini-1.5-flash-8b",
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-3-flash-preview",
+];
+
+// ── Modèles IMAGE — ⚠️ AUCUN n'est gratuit sur l'API (juin 2026).
+// Fallback conservé pour la fiabilité (le modèle le + récent peut être
+// temporairement surchargé), mais chaque appel qui aboutit est FACTURÉ.
+const IMAGE_MODELS = [
+  "gemini-3.1-flash-image", // Nano Banana 2 — ~$0.045/image, rapide, par défaut
+  "gemini-2.5-flash-image", // Nano Banana (legacy) — ~$0.039/image, fallback
+  "imagen-4.0-fast-generate-001", // Imagen 4 Fast — $0.02/image, dernier recours (pas d'édition conversationnelle)
 ];
 
 /**
  * Fonction utilitaire pour appeler l'API Gemini avec gestion de fallback
  */
 const callGeminiWithFallback = async (models, endpoint, payload, userId) => {
+  let lastErr;
   for (const model of models) {
     try {
       const url = `${BASE_URL}/${model}:${endpoint}?key=${API_KEY}`;
@@ -28,39 +37,40 @@ const callGeminiWithFallback = async (models, endpoint, payload, userId) => {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        throw new Error(
+        const err = new Error(
           `Status ${response.status}: ${errorData.error?.message || "Unknown error"}`,
         );
+        err.status = response.status;
+        throw err;
       }
 
       const data = await response.json();
-      // On retourne le résultat ainsi que le modèle qui a fonctionné
       return { data, modelUsed: model };
     } catch (err) {
+      lastErr = err;
       await log("warn", `Échec avec le modèle ${model}: ${err.message}`, {
         userId,
       });
-      // La boucle continue vers le modèle suivant
+      // Erreur définitive (400 mauvaise requête, 401/403 auth) → inutile de continuer
+      if (err.status && ![429, 500, 503].includes(err.status)) throw err;
     }
   }
-  throw new Error(
-    "Tous les modèles gratuits ont échoué ou ont atteint leur quota.",
+  throw (
+    lastErr ||
+    new Error("Tous les modèles ont échoué ou ont atteint leur quota.")
   );
 };
 
 /**
- * Génère un texte de statut WhatsApp via Gemini (API REST)
+ * Génère un texte de statut WhatsApp via Gemini (API REST) — gratuit
  */
 export const generateStatusText = async (user) => {
   const themes = user.geminiThemes;
   const theme = themes[user.themeIndex % themes.length];
   const prompt = user.geminiPromptTemplate.replace("{{theme}}", theme);
 
-  const payload = {
-    contents: [{ parts: [{ text: prompt }] }],
-  };
+  const payload = { contents: [{ parts: [{ text: prompt }] }] };
 
-  // Appel avec la boucle de secours
   const { data, modelUsed } = await callGeminiWithFallback(
     FREE_TEXT_MODELS,
     "generateContent",
@@ -77,8 +87,9 @@ export const generateStatusText = async (user) => {
 };
 
 /**
- * Génère une image via Gemini Imagen (API REST) et l'uploade sur Cloudinary
- * Note : Imagen 3 (imagen-3.0-generate-002) est généralement le modèle standard actuel.
+ * Génère une image via Gemini (API REST) et l'uploade sur Cloudinary
+ * ⚠️ PAYANT — aucun modèle image n'a de free tier sur l'API en 2026.
+ * Vérifie ton budget/plafond de facturation avant d'activer cette fonction en prod.
  */
 export const generateStatusImage = async (theme, userId) => {
   try {
@@ -91,14 +102,8 @@ export const generateStatusImage = async (theme, userId) => {
       generationConfig: { responseModalities: ["IMAGE"] },
     };
 
-    // Pour l'image, on tente le modèle 2.0 en premier, sinon le modèle imagen standard
-    const imageModels = [
-      "gemini-2.0-flash-preview-image-generation",
-      "imagen-3.0-generate-002",
-    ];
-
     const { data, modelUsed } = await callGeminiWithFallback(
-      imageModels,
+      IMAGE_MODELS,
       "generateContent",
       payload,
       userId,
@@ -123,7 +128,7 @@ export const generateStatusImage = async (theme, userId) => {
 
     await log(
       "success",
-      `Image générée via ${modelUsed} et uploadée sur Cloudinary`,
+      `Image générée via ${modelUsed} (payant) et uploadée sur Cloudinary`,
       { userId },
     );
     return { imageUrl: uploaded.secure_url, imagePublicId: uploaded.public_id };
