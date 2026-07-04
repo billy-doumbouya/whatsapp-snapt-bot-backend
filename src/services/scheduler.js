@@ -5,36 +5,33 @@ import { publishStatus } from "./whatsapp.js";
 import User from "../models/User.js";
 import { generateFullPost } from "./gemini.js";
 
-/**
- * Calcule une heure aléatoire dans la plage [min, max] pour aujourd'hui
- */
 const randomScheduleToday = (hourMin, hourMax) => {
   const now = new Date();
   const hour = Math.floor(Math.random() * (hourMax - hourMin + 1)) + hourMin;
   const minute = Math.floor(Math.random() * 60);
   const target = new Date(now);
   target.setHours(hour, minute, 0, 0);
-  // Si l'heure est déjà passée aujourd'hui, on la met à J+1
   if (target <= now) target.setDate(target.getDate() + 1);
   return target;
 };
 
-/**
- * Génère le brouillon du jour pour un user si aucun post schedulé n'existe
- */
-const generateDraftForUser = async (user) => {
+// Helper factorisé — utilisé par generateDraftForUser ET manualGenerate
+const findTodayPost = async (userId) => {
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
   const endOfDay = new Date();
   endOfDay.setHours(23, 59, 59, 999);
 
-  const existing = await Post.findOne({
-    userId: user._id,
+  return Post.findOne({
+    userId,
     scheduledAt: { $gte: startOfDay, $lte: endOfDay },
     status: { $in: ["draft", "scheduled"] },
   });
+};
 
-  if (existing) return; // Déjà un post prévu aujourd'hui
+const generateDraftForUser = async (user) => {
+  const existing = await findTodayPost(user._id);
+  if (existing) return;
 
   try {
     const { text, theme, prompt, imageUrl, imagePublicId } =
@@ -55,16 +52,13 @@ const generateDraftForUser = async (user) => {
       scheduledAt,
     });
 
-    // Avance l'index du thème
     user.themeIndex = (user.themeIndex + 1) % user.geminiThemes.length;
     await user.save();
 
     await log(
       "success",
       `Post généré et schedulé pour ${scheduledAt.toLocaleTimeString("fr-FR")}`,
-      {
-        userId: user._id,
-      },
+      { userId: user._id },
     );
   } catch (err) {
     await log("error", `Génération échouée : ${err.message}`, {
@@ -73,9 +67,6 @@ const generateDraftForUser = async (user) => {
   }
 };
 
-/**
- * Vérifie et publie les posts dont l'heure est arrivée
- */
 const publishDuePosts = async () => {
   const now = new Date();
   const posts = await Post.find({
@@ -114,11 +105,7 @@ const publishDuePosts = async () => {
   }
 };
 
-/**
- * Démarre les crons globaux
- */
 export const startScheduler = () => {
-  // Génération auto des brouillons chaque jour à 06:00
   cron.schedule("0 6 * * *", async () => {
     await log("info", "⏰ Lancement génération quotidienne");
     const users = await User.find({ isActive: true, autoGenerate: true });
@@ -127,7 +114,6 @@ export const startScheduler = () => {
     }
   });
 
-  // Vérification des posts à publier toutes les 5 minutes
   cron.schedule("*/5 * * * *", async () => {
     await publishDuePosts();
   });
@@ -142,10 +128,13 @@ export const manualGenerate = async (userId) => {
   const user = await User.findById(userId);
   if (!user) throw new Error("Utilisateur introuvable");
 
+  // FIX: anti-doublon — si un post existe déjà aujourd'hui, on le retourne au lieu d'en créer un nouveau
+  const existing = await findTodayPost(user._id);
+  if (existing) return existing;
+
   let text, theme, prompt, imageUrl, imagePublicId;
 
   try {
-    // On tente de générer avec l'IA
     const aiPost = await generateFullPost(user);
     text = aiPost.text;
     theme = aiPost.theme;
@@ -157,7 +146,6 @@ export const manualGenerate = async (userId) => {
       "Gemini API Error, fallback sur un texte de secours:",
       aiError.message,
     );
-    // TEXTE DE SECOURS pour que l'utilisateur puisse au moins éditer son post !
     text =
       "Nouveau statut en cours de préparation... (L'IA a atteint son quota, écrivez votre texte ici !)";
     theme = user.geminiThemes[user.themeIndex] || "Général";
@@ -176,7 +164,7 @@ export const manualGenerate = async (userId) => {
     prompt,
     imageUrl,
     imagePublicId,
-    status: "draft",
+    status: "scheduled", // ← FIX: était "draft", invisible pour publishDuePosts
     scheduledAt,
     isManual: true,
   });

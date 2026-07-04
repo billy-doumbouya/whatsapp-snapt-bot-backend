@@ -6,12 +6,12 @@ import cloudinary from "../config/cloudinary.js";
 
 const router = Router();
 
-// GET /api/posts — posts du user connecté (ou tous si admin avec ?all=true)
 router.get("/", protect, async (req, res) => {
   try {
-    const filter = req.query.all === "true" && req.user.role === "admin"
-      ? {}
-      : { userId: req.user._id };
+    const filter =
+      req.query.all === "true" && req.user.role === "admin"
+        ? {}
+        : { userId: req.user._id };
 
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
@@ -32,7 +32,6 @@ router.get("/", protect, async (req, res) => {
   }
 });
 
-// GET /api/posts/today — post du jour
 router.get("/today", protect, async (req, res) => {
   try {
     const start = new Date();
@@ -51,7 +50,6 @@ router.get("/today", protect, async (req, res) => {
   }
 });
 
-// POST /api/posts/generate — générer un post manuellement
 router.post("/generate", protect, async (req, res) => {
   try {
     const post = await manualGenerate(req.user._id.toString());
@@ -64,7 +62,10 @@ router.post("/generate", protect, async (req, res) => {
 // PATCH /api/posts/:id — modifier texte/image/scheduledAt (override manuel)
 router.patch("/:id", protect, async (req, res) => {
   try {
-    const post = await Post.findOne({ _id: req.params.id, userId: req.user._id });
+    const post = await Post.findOne({
+      _id: req.params.id,
+      userId: req.user._id,
+    });
     if (!post) return res.status(404).json({ error: "Post introuvable" });
 
     const allowed = ["text", "imageUrl", "scheduledAt", "status"];
@@ -72,6 +73,11 @@ router.patch("/:id", protect, async (req, res) => {
       if (req.body[key] !== undefined) post[key] = req.body[key];
     }
     post.isManual = true;
+
+    // FIX: un post édité manuellement doit redevenir "scheduled" pour être
+    // repris par publishDuePosts, sinon il reste bloqué en "draft" pour toujours
+    if (post.status === "draft") post.status = "scheduled";
+
     await post.save();
     res.json({ post });
   } catch (err) {
@@ -79,7 +85,6 @@ router.patch("/:id", protect, async (req, res) => {
   }
 });
 
-// POST /api/posts/:id/publish — forcer la publication immédiate
 router.post("/:id/publish", protect, async (req, res) => {
   try {
     const post = await forcePublish(req.params.id, req.user._id.toString());
@@ -89,13 +94,14 @@ router.post("/:id/publish", protect, async (req, res) => {
   }
 });
 
-// DELETE /api/posts/:id
 router.delete("/:id", protect, async (req, res) => {
   try {
-    const post = await Post.findOne({ _id: req.params.id, userId: req.user._id });
+    const post = await Post.findOne({
+      _id: req.params.id,
+      userId: req.user._id,
+    });
     if (!post) return res.status(404).json({ error: "Post introuvable" });
 
-    // Supprimer l'image Cloudinary si elle existe
     if (post.imagePublicId) {
       await cloudinary.uploader.destroy(post.imagePublicId);
     }

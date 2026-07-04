@@ -1,28 +1,21 @@
 import { log } from "../utils/logger.js";
-// import { v2 as cloudinary } from 'cloudinary';
+import { v2 as cloudinary } from "cloudinary"; // ← FIX: était commenté, causait un ReferenceError silencieux
 
 const API_KEY = process.env.GEMINI_API_KEY;
 const BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 
-// ── Modèles TEXTE — free tier confirmé (Flash / Flash-Lite uniquement) ──
 const FREE_TEXT_MODELS = [
   "gemini-2.5-flash",
   "gemini-2.5-flash-lite",
   "gemini-3-flash-preview",
 ];
 
-// ── Modèles IMAGE — ⚠️ AUCUN n'est gratuit sur l'API (juin 2026).
-// Fallback conservé pour la fiabilité (le modèle le + récent peut être
-// temporairement surchargé), mais chaque appel qui aboutit est FACTURÉ.
 const IMAGE_MODELS = [
-  "gemini-3.1-flash-image", // Nano Banana 2 — ~$0.045/image, rapide, par défaut
-  "gemini-2.5-flash-image", // Nano Banana (legacy) — ~$0.039/image, fallback
-  "imagen-4.0-fast-generate-001", // Imagen 4 Fast — $0.02/image, dernier recours (pas d'édition conversationnelle)
+  "gemini-3.1-flash-image",
+  "gemini-2.5-flash-image",
+  "imagen-4.0-fast-generate-001",
 ];
 
-/**
- * Fonction utilitaire pour appeler l'API Gemini avec gestion de fallback
- */
 const callGeminiWithFallback = async (models, endpoint, payload, userId) => {
   let lastErr;
   for (const model of models) {
@@ -51,7 +44,6 @@ const callGeminiWithFallback = async (models, endpoint, payload, userId) => {
       await log("warn", `Échec avec le modèle ${model}: ${err.message}`, {
         userId,
       });
-      // Erreur définitive (400 mauvaise requête, 401/403 auth) → inutile de continuer
       if (err.status && ![429, 500, 503].includes(err.status)) throw err;
     }
   }
@@ -61,9 +53,6 @@ const callGeminiWithFallback = async (models, endpoint, payload, userId) => {
   );
 };
 
-/**
- * Génère un texte de statut WhatsApp via Gemini (API REST) — gratuit
- */
 export const generateStatusText = async (user) => {
   const themes = user.geminiThemes;
   const theme = themes[user.themeIndex % themes.length];
@@ -86,11 +75,6 @@ export const generateStatusText = async (user) => {
   return { text, theme, prompt };
 };
 
-/**
- * Génère une image via Gemini (API REST) et l'uploade sur Cloudinary
- * ⚠️ PAYANT — aucun modèle image n'a de free tier sur l'API en 2026.
- * Vérifie ton budget/plafond de facturation avant d'activer cette fonction en prod.
- */
 export const generateStatusImage = async (theme, userId) => {
   try {
     const imagePrompt =
@@ -138,9 +122,6 @@ export const generateStatusImage = async (theme, userId) => {
   }
 };
 
-/**
- * Génère texte + image pour un utilisateur
- */
 export const generateFullPost = async (user) => {
   const { text, theme, prompt } = await generateStatusText(user);
 
