@@ -179,19 +179,37 @@ export const manualGenerate = async (userId) => {
  * Publie immédiatement un post (forcer depuis le dashboard)
  */
 export const forcePublish = async (postId, userId) => {
-  const post = await Post.findOne({ _id: postId, userId });
-  if (!post) throw new Error("Post introuvable");
+  // Verrou atomique : on ne passe en "publishing" que si le post n'est pas déjà
+  // en train d'être publié ou déjà publié — bloque les clics multiples/concurrents
+  const post = await Post.findOneAndUpdate(
+    { _id: postId, userId, status: { $nin: ["published", "publishing"] } },
+    { status: "publishing" },
+    { new: true },
+  );
 
-  await publishStatus(userId, { text: post.text, imageUrl: post.imageUrl });
+  if (!post) {
+    throw new Error(
+      "Post introuvable, déjà publié, ou publication déjà en cours",
+    );
+  }
 
-  post.status = "published";
-  post.publishedAt = new Date();
-  await post.save();
+  try {
+    await publishStatus(userId, { text: post.text, imageUrl: post.imageUrl });
 
-  await log("success", "Publication forcée depuis le dashboard", {
-    userId,
-    postId: post._id,
-  });
+    post.status = "published";
+    post.publishedAt = new Date();
+    await post.save();
 
-  return post;
+    await log("success", "Publication forcée depuis le dashboard", {
+      userId,
+      postId: post._id,
+    });
+
+    return post;
+  } catch (err) {
+    post.status = "failed";
+    post.errorMessage = err.message;
+    await post.save();
+    throw err;
+  }
 };

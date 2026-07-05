@@ -14,12 +14,14 @@ import adminRoutes from "./routes/admin.js";
 import logsRoutes from "./routes/logs.js";
 
 import User from "./models/User.js";
-import { initAllClients } from "./services/whatsapp.js";
+import { attachProcessSafetyNet, initAllClients } from "./services/whatsapp.js";
 import { startScheduler } from "./services/scheduler.js";
 import { log } from "./utils/logger.js";
 
 const app = express();
 const httpServer = createServer(app);
+
+attachProcessSafetyNet();
 
 // --- Configuration des Origines CORS (Express & Socket.io) ---
 const allowedOrigins = process.env.FRONTEND_URL

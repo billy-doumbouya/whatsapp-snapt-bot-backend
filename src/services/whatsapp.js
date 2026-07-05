@@ -14,9 +14,6 @@ const STATUSES = {
   AUTH_FAILURE: "auth_failure",
 };
 
-// ─── Configuration (surchageable via variables d'env Railway) ───
-// IMPORTANT : WWEBJS_DATA_PATH doit pointer vers un volume PERSISTANT Railway
-// (ex: /data/.wwebjs_auth), sinon la session est perdue à chaque redéploiement.
 const DATA_PATH =
   process.env.WWEBJS_DATA_PATH || path.resolve("./.wwebjs_auth");
 const MAX_CONCURRENT_INIT = parseInt(
@@ -26,19 +23,17 @@ const MAX_CONCURRENT_INIT = parseInt(
 const IDLE_TIMEOUT_MS = parseInt(
   process.env.WA_IDLE_TIMEOUT_MS || String(2 * 60 * 60 * 1000),
   10,
-); // 2h
-const IDLE_CHECK_INTERVAL_MS = 15 * 60 * 1000; // vérifie toutes les 15 min
+);
+const IDLE_CHECK_INTERVAL_MS = 15 * 60 * 1000;
 const RECONNECT_MAX_RETRIES = 5;
 const RECONNECT_BASE_DELAY_MS = 5000;
 const READY_TIMEOUT_MS = 60_000;
 
 fs.ensureDirSync(DATA_PATH);
 
-const clients = new Map(); // userId -> state
-const pendingInits = new Map(); // userId -> Promise (dédoublonne les appels concurrents)
+const clients = new Map();
+const pendingInits = new Map();
 
-// ─── Semaphore : limite le nombre de Chromium lancés en même temps ───
-// Évite qu'un pic de 50 users déclenche 50 Puppeteer d'un coup et fasse OOM.
 let activeInits = 0;
 const initQueue = [];
 const acquireInitSlot = () =>
@@ -61,7 +56,6 @@ const releaseInitSlot = () => {
 
 const sessionDirFor = (sUserId) => path.join(DATA_PATH, `session-${sUserId}`);
 
-/** Supprime la session locale corrompue/expirée pour forcer un nouveau QR */
 const wipeLocalSession = async (sUserId) => {
   try {
     await fs.remove(sessionDirFor(sUserId));
@@ -74,9 +68,6 @@ const wipeLocalSession = async (sUserId) => {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/**
- * Attend que le client passe à CONNECTED, ou rejette si QR requis / timeout.
- */
 const waitForReady = (state, timeoutMs = READY_TIMEOUT_MS) =>
   new Promise((resolve, reject) => {
     if (state.status === STATUSES.CONNECTED) return resolve(state);
@@ -94,7 +85,7 @@ const waitForReady = (state, timeoutMs = READY_TIMEOUT_MS) =>
         resolve(state);
       } else if (state.status === STATUSES.QR_READY) {
         cleanup();
-        reject(new Error("QR_REQUIRED")); // reconnexion impossible sans scan manuel
+        reject(new Error("QR_REQUIRED"));
       } else if (state.status === STATUSES.AUTH_FAILURE) {
         cleanup();
         reject(
@@ -111,9 +102,6 @@ const waitForReady = (state, timeoutMs = READY_TIMEOUT_MS) =>
     };
   });
 
-/**
- * Planifie une tentative de reconnexion avec backoff exponentiel.
- */
 const scheduleReconnect = (sUserId, io) => {
   const state = clients.get(sUserId);
   if (!state) return;
@@ -123,9 +111,7 @@ const scheduleReconnect = (sUserId, io) => {
     log(
       "error",
       `Abandon de la reconnexion auto après ${RECONNECT_MAX_RETRIES} tentatives`,
-      {
-        userId: sUserId,
-      },
+      { userId: sUserId },
     );
     return;
   }
@@ -134,9 +120,7 @@ const scheduleReconnect = (sUserId, io) => {
   log(
     "info",
     `Reconnexion planifiée dans ${delay}ms (tentative ${state.retryCount})`,
-    {
-      userId: sUserId,
-    },
+    { userId: sUserId },
   );
 
   setTimeout(async () => {
@@ -151,10 +135,6 @@ const scheduleReconnect = (sUserId, io) => {
   }, delay);
 };
 
-/**
- * Retourne ou crée le client WA pour un userId.
- * Dédoublonne les appels concurrents et limite les lancements Puppeteer simultanés.
- */
 export const getOrCreateClient = async (userId, io) => {
   const sUserId = userId.toString();
 
@@ -188,8 +168,14 @@ const buildClient = async (sUserId, io) => {
       clientId: sUserId,
       dataPath: DATA_PATH,
     }),
+    webVersionCache: {
+      type: "remote",
+      remotePath:
+        "https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1042490225-alpha.html",
+      strict: false,
+    },
     puppeteer: {
-      headless: true,
+      headless: true, // ← CORRIGÉ (était false)
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
@@ -199,10 +185,12 @@ const buildClient = async (sUserId, io) => {
         "--disable-accelerated-2d-canvas",
         "--no-first-run",
         "--no-zygote",
+        "--disable-session-crashed-bubble",
+        "--disable-infobars",
+        "--hide-crash-restore-bubble",
       ],
     },
   });
-
   const state = {
     client,
     status: STATUSES.INITIALIZING,
@@ -216,7 +204,7 @@ const buildClient = async (sUserId, io) => {
     const qrImage = await qrcode.toDataURL(qr);
     state.status = STATUSES.QR_READY;
     state.qr = qrImage;
-    state.retryCount = 0; // un nouveau QR = on repart de zéro
+    state.retryCount = 0;
     io?.to(`user:${sUserId}`).emit("wa:qr", { qr: qrImage });
     await log("info", "QR code généré, scan requis", { userId: sUserId });
   });
@@ -254,8 +242,6 @@ const buildClient = async (sUserId, io) => {
     } catch {}
     clients.delete(sUserId);
 
-    // LOGOUT = l'utilisateur a délié l'appareil depuis son téléphone.
-    // Inutile de retenter : la session locale est invalide, il faut un nouveau QR.
     if (String(reason).toUpperCase().includes("LOGOUT")) {
       await wipeLocalSession(sUserId);
       await log("warn", "Session invalidée (logout), nouveau QR requis", {
@@ -264,7 +250,6 @@ const buildClient = async (sUserId, io) => {
       return;
     }
 
-    // Sinon (perte réseau, navigation, etc.) → on retente automatiquement
     scheduleReconnect(sUserId, io);
   });
 
@@ -281,14 +266,24 @@ const buildClient = async (sUserId, io) => {
     clients.delete(sUserId);
   });
 
-  await client.initialize();
+  // ← AJOUTÉ : try/catch pour éviter un client "zombie" bloqué dans la Map
+  // si l'injection échoue (ex: Execution context destroyed)
+  try {
+    await client.initialize();
+  } catch (err) {
+    await log("error", `Échec initialize() : ${err.message}`, {
+      userId: sUserId,
+    });
+    try {
+      await client.destroy();
+    } catch {}
+    clients.delete(sUserId);
+    throw err;
+  }
+
   return state;
 };
 
-/**
- * Publie un statut WhatsApp (texte + image optionnelle).
- * Tente une reconnexion à la volée si le client est éteint (ex: nettoyé pour inactivité).
- */
 export const publishStatus = async (userId, { text, imageUrl }, io) => {
   const sUserId = userId.toString();
 
@@ -342,12 +337,6 @@ export const getClientStatus = (userId) => {
   return { status: state.status, qr: state.qr };
 };
 
-/**
- * Initialise les clients au démarrage, avec un délai entre chaque
- * pour ne pas lancer 50 Chromium en même temps (le semaphore limite déjà
- * la concurrence, mais l'étalement évite aussi de saturer MongoDB/réseau
- * au boot).
- */
 export const initAllClients = async (users, io) => {
   for (const user of users) {
     try {
@@ -356,20 +345,13 @@ export const initAllClients = async (users, io) => {
       await log(
         "error",
         `Init client échoué pour ${user.email} : ${err.message}`,
-        {
-          userId: user._id,
-        },
+        { userId: user._id },
       );
     }
-    await sleep(1000); // étalement léger, en plus du semaphore
+    await sleep(1000);
   }
 };
 
-/**
- * Nettoyage périodique des clients inactifs pour libérer la RAM.
- * La session reste sur disque (LocalAuth) : le prochain appel à publishStatus
- * relance le client automatiquement, sans re-scan de QR.
- */
 export const startIdleCleanup = () => {
   setInterval(async () => {
     const now = Date.now();
@@ -390,20 +372,12 @@ export const startIdleCleanup = () => {
   }, IDLE_CHECK_INTERVAL_MS);
 };
 
-/**
- * Filet de sécurité process-level : log proprement puis quitte,
- * pour laisser Railway redémarrer le service au lieu de rester
- * bloqué dans un état corrompu (cas nodemon en dev).
- * À appeler UNE FOIS au tout début de index.js.
- */
 export const attachProcessSafetyNet = () => {
   process.on("uncaughtException", async (err) => {
     await log(
       "error",
       `Exception non gérée, arrêt du process : ${err.message}`,
-      {
-        details: err.stack,
-      },
+      { details: err.stack },
     );
     process.exit(1);
   });
