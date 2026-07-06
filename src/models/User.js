@@ -14,7 +14,13 @@ const userSchema = new mongoose.Schema(
     password: { type: String, required: true },
     role: { type: String, enum: ["admin", "user"], default: "user" },
     isActive: { type: Boolean, default: true },
-    // Paramètres Gemini propres à chaque user
+    businessName: { type: String, default: "Notre entreprise", trim: true },
+    assistantPrompt: {
+      type: String,
+      default:
+        "Tu es l'assistant de {{businessName}}. Réponds de façon concise, professionnelle et utile à nos clients.",
+    },
+    botEnabled: { type: Boolean, default: true },
     geminiPromptTemplate: {
       type: String,
       default:
@@ -35,18 +41,10 @@ const userSchema = new mongoose.Schema(
         "Communauté et solidarité",
       ],
     },
-
     statusFeatureEnabled: { type: Boolean, default: false }, // best-effort, désactivé par défaut
     publishHourMin: { type: Number, default: 8 },
     publishHourMax: { type: Number, default: 20 },
-    geminiThemes: {
-      type: [String],
-      default: ["Motivation", "Conseil du jour"],
-    },
     themeIndex: { type: Number, default: 0 },
-    themeIndex: { type: Number, default: 0 },
-    publishHourMin: { type: Number, default: 9 },
-    publishHourMax: { type: Number, default: 21 },
     autoGenerate: { type: Boolean, default: true },
     generateImage: { type: Boolean, default: true },
   },

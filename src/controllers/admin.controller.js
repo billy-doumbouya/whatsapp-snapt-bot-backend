@@ -31,7 +31,7 @@ export const createUser = asyncHandler(async (req, res) => {
     email,
     businessName,
     password: hashed,
-    role: "client",
+    role: "user",
   });
 
   try {

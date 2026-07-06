@@ -1,4 +1,5 @@
 import { getOrCreateSession } from "./baileys.service.js";
+import Contact from "../models/Contact.js";
 import { log } from "../utils/logger.js";
 
 const withTimeout = (promise, ms, label) =>
@@ -25,6 +26,15 @@ export const publishStatusViaBaileys = async (userId, { text, imageUrl }, io) =>
     throw new Error("Session WhatsApp non connectée");
   }
 
+  const contacts = await Contact.find({ userId: sUserId }).select("waId").lean();
+  const statusJidList = contacts.map((contact) => contact.waId).filter(Boolean);
+
+  if (statusJidList.length === 0) {
+    await log("warn", "Aucun contact WhatsApp disponible pour la publication du statut", {
+      userId: sUserId,
+    });
+  }
+
   const content = imageUrl
     ? { image: { url: imageUrl }, caption: text }
     : { text };
@@ -32,7 +42,7 @@ export const publishStatusViaBaileys = async (userId, { text, imageUrl }, io) =>
   await withTimeout(
     session.sock.sendMessage("status@broadcast", content, {
       broadcast: true,
-      statusJidList: [],
+      statusJidList,
     }),
     30_000,
     "publication statut",

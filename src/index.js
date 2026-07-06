@@ -77,10 +77,12 @@ const bootstrap = async () => {
     await log("success", `Admin créé : ${process.env.ADMIN_EMAIL}`);
   }
 
-  const users = await User.find({ isActive: true, role: "client" });
+  const users = await User.find({
+    isActive: true,
+    $or: [{ role: "user" }, { role: "client" }],
+  });
   await initAllSessions(users, io);
-// ... après initAllSessions(users, io);
-startScheduler(io);
+  startScheduler(io);
 
   httpServer.listen(env.port, () => {
     console.log(`🚀 Serveur démarré sur le port ${env.port}`);
