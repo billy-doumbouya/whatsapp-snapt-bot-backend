@@ -5,6 +5,25 @@ import Message from "../models/Message.js";
 const genAI = new GoogleGenerativeAI(env.geminiApiKey);
 const HISTORY_LIMIT = 10;
 
+// Ajout dans ai.service.js — adapte selon ton client Gemini existant
+
+export const transcribeAudio = async (audioBuffer, mimeType) => {
+  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+  const base64Audio = audioBuffer.toString("base64");
+
+  const result = await model.generateContent([
+    "Transcris fidèlement ce message vocal en texte, dans sa langue d'origine. Réponds uniquement avec la transcription, sans commentaire additionnel.",
+    {
+      inlineData: {
+        mimeType,
+        data: base64Audio,
+      },
+    },
+  ]);
+
+  return result.response.text().trim();
+};
+
 export const generateReply = async (user, contactId, incomingText) => {
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 

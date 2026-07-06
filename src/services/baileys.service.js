@@ -2,6 +2,7 @@ import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  downloadMediaMessage,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import qrcode from "qrcode";
@@ -13,7 +14,7 @@ import { log } from "../utils/logger.js";
 import User from "../models/User.js";
 import Contact from "../models/Contact.js";
 import Message from "../models/Message.js";
-import { generateReply } from "./ai.service.js";
+import { generateReply, transcribeAudio } from "./ai.service.js";
 
 const STATUSES = {
   INITIALIZING: "initializing",
@@ -56,13 +57,14 @@ const buildSession = async (sUserId, io) => {
     sessionPath(sUserId),
   );
 
-   const { version } = await fetchLatestBaileysVersion();
+  const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
     auth: state,
     logger: silentLogger,
     printQRInTerminal: false,
     version,
+    markOnlineOnConnect: false,
   });
 
   const session = {
@@ -135,9 +137,49 @@ const buildSession = async (sUserId, io) => {
   return session;
 };
 
+/** Détecte le type de contenu du message entrant */
+const getMessageType = (message) => {
+  if (message.conversation || message.extendedTextMessage) return "text";
+  if (message.imageMessage) return "image";
+  if (message.videoMessage) return "video";
+  if (message.audioMessage) return "audio";
+  if (message.documentMessage) return "document";
+  if (message.stickerMessage) return "sticker";
+  return "unsupported";
+};
+
+/** Vérifie si le bot (le numéro connecté) est explicitement mentionné dans un message de groupe */
+const isBotMentioned = (msg, ownJid) => {
+  if (!ownJid) return false;
+  const contextInfo =
+    msg.message?.extendedTextMessage?.contextInfo ||
+    msg.message?.imageMessage?.contextInfo ||
+    msg.message?.videoMessage?.contextInfo ||
+    msg.message?.audioMessage?.contextInfo;
+  const mentioned = contextInfo?.mentionedJid || [];
+  const ownNumber = ownJid.split("@")[0];
+  return mentioned.some((jid) => jid.split("@")[0] === ownNumber);
+};
+
+/** Message de repli quand le bot ne peut pas traiter le contenu (image/audio non exploitable) */
+const buildFallbackMessage = (businessName, reason) => {
+  const base = `Bonjour, je suis l'assistant automatique de ${businessName}. Un membre de l'équipe vous répondra dès que possible.`;
+  if (reason === "image") {
+    return `${base} Je n'ai pas la permission de traiter les images pour le moment.`;
+  }
+  if (reason === "audio") {
+    return `${base} Je n'ai pas pu traiter votre message vocal pour le moment.`;
+  }
+  return `${base} Je ne peux pas traiter ce type de message pour le moment.`;
+};
+
 /**
  * Traite un message entrant.
  * - Si c'est le propriétaire qui s'écrit "stop"/"start" à lui-même : bascule botEnabled
+ * - Si groupe : ignore sauf mention explicite du numéro du bot
+ * - Si image/vidéo avec légende : répond selon la légende
+ * - Si image/vidéo sans légende : message de repli (pas de traitement d'image)
+ * - Si audio : transcription puis réponse ; repli si transcription impossible
  * - Sinon, si botEnabled : génère une réponse IA et l'envoie
  */
 const handleIncomingMessage = async (sUserId, session, msg, io) => {
@@ -145,10 +187,75 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
 
   const remoteJid = msg.key.remoteJid;
   const isFromMe = msg.key.fromMe;
-  const text =
-    msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+  const isGroup = remoteJid.endsWith("@g.us");
+  const messageType = getMessageType(msg.message);
 
-  if (!text.trim()) return;
+  // ─── Groupes : on ignore sauf mention explicite du numéro du bot ───
+  if (isGroup) {
+    const mentioned = isBotMentioned(msg, session.ownJid);
+    if (!mentioned) return;
+  }
+
+  // ─── Extraction du texte selon le type de contenu ───
+  let text = "";
+  let mediaFallbackReason = null;
+
+  if (messageType === "text") {
+    text =
+      msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+  } else if (messageType === "image") {
+    text = msg.message.imageMessage?.caption || "";
+    if (!text.trim()) mediaFallbackReason = "image";
+  } else if (messageType === "video") {
+    text = msg.message.videoMessage?.caption || "";
+    if (!text.trim()) mediaFallbackReason = "image"; // même repli que les images
+  } else if (messageType === "audio") {
+    try {
+      const buffer = await downloadMediaMessage(
+        msg,
+        "buffer",
+        {},
+        {
+          logger: silentLogger,
+          reuploadRequest: session.sock.updateMediaMessage,
+        },
+      );
+      const mimeType = msg.message.audioMessage?.mimetype || "audio/ogg";
+      const transcript = await transcribeAudio(buffer, mimeType);
+      text = (transcript || "").trim();
+      if (!text) mediaFallbackReason = "audio";
+    } catch (err) {
+      await log("error", `Erreur transcription audio : ${err.message}`, {
+        userId: sUserId,
+      });
+      mediaFallbackReason = "audio";
+    }
+  } else if (messageType === "audio") {
+    try {
+      const buffer = await downloadMediaMessage(
+        msg,
+        "buffer",
+        {},
+        {
+          logger: silentLogger,
+          reuploadRequest: session.sock.updateMediaMessage,
+        },
+      );
+      const rawMimeType = msg.message.audioMessage?.mimetype || "audio/ogg";
+      const mimeType = rawMimeType.split(";")[0].trim(); // ← nettoie "audio/ogg; codecs=opus" → "audio/ogg"
+      const transcript = await transcribeAudio(buffer, mimeType);
+      text = (transcript || "").trim();
+      if (!text) mediaFallbackReason = "audio";
+    } catch (err) {
+      await log("error", `Erreur transcription audio : ${err.message}`, {
+        userId: sUserId,
+      });
+      mediaFallbackReason = "audio";
+    }
+  } else {
+    // documents, stickers, etc. : non supportés
+    mediaFallbackReason = "unsupported";
+  }
 
   const normalized = text.trim().toLowerCase();
 
@@ -177,6 +284,37 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
     { lastInteractionAt: new Date() },
     { upsert: true, new: true },
   );
+
+  // ─── Cas média non exploitable : message de repli, pas d'appel IA ───
+  if (mediaFallbackReason) {
+    const fallback = buildFallbackMessage(
+      user.businessName,
+      mediaFallbackReason,
+    );
+
+    await Message.create({
+      userId: sUserId,
+      contactId: contact._id,
+      direction: "in",
+      text: `[${messageType}] (non traité)`,
+    });
+
+    await session.sock.sendMessage(remoteJid, { text: fallback });
+
+    await Message.create({
+      userId: sUserId,
+      contactId: contact._id,
+      direction: "out",
+      text: fallback,
+    });
+
+    io?.to(`user:${sUserId}`).emit("conversation:update", {
+      contactId: contact._id,
+    });
+    return;
+  }
+
+  if (!text.trim()) return; // sécurité supplémentaire, ne devrait plus arriver ici
 
   await Message.create({
     userId: sUserId,
@@ -228,8 +366,7 @@ export const destroySession = async (userId) => {
   } catch {}
 
   sessions.delete(sUserId);
-  pendingInits.delete(sUserId); // ← évite aussi de retourner une init fantôme en cours
+  pendingInits.delete(sUserId);
 
-  // Suppression garantie ici, sans dépendre du timing du handler connection.update
   await fs.remove(sessionPath(sUserId));
 };
