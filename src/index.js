@@ -1,3 +1,4 @@
+import { startScheduler } from "./services/scheduler.service.js";
 import "dotenv/config";
 import express from "express";
 import { createServer } from "http";
@@ -78,6 +79,8 @@ const bootstrap = async () => {
 
   const users = await User.find({ isActive: true, role: "client" });
   await initAllSessions(users, io);
+// ... après initAllSessions(users, io);
+startScheduler(io);
 
   httpServer.listen(env.port, () => {
     console.log(`🚀 Serveur démarré sur le port ${env.port}`);

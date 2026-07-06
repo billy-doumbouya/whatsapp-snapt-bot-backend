@@ -28,3 +28,14 @@ export const generateReply = async (user, contactId, incomingText) => {
   const result = await model.generateContent(prompt);
   return result.response.text().trim();
 };
+
+export const generateFullPost = async (user) => {
+  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+  const theme = user.geminiThemes[user.themeIndex % user.geminiThemes.length];
+  const prompt = `Génère un court texte inspirant pour un statut WhatsApp sur le thème : "${theme}". Maximum 200 caractères, avec 1 emoji pertinent.`;
+
+  const result = await model.generateContent(prompt);
+  const text = result.response.text().trim();
+
+  return { text, theme, prompt };
+};

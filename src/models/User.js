@@ -35,12 +35,22 @@ const userSchema = new mongoose.Schema(
         "Communauté et solidarité",
       ],
     },
+
+    statusFeatureEnabled: { type: Boolean, default: false }, // best-effort, désactivé par défaut
+    publishHourMin: { type: Number, default: 8 },
+    publishHourMax: { type: Number, default: 20 },
+    geminiThemes: {
+      type: [String],
+      default: ["Motivation", "Conseil du jour"],
+    },
+    themeIndex: { type: Number, default: 0 },
     themeIndex: { type: Number, default: 0 },
     publishHourMin: { type: Number, default: 9 },
     publishHourMax: { type: Number, default: 21 },
     autoGenerate: { type: Boolean, default: true },
     generateImage: { type: Boolean, default: true },
   },
+
   { timestamps: true },
 );
 

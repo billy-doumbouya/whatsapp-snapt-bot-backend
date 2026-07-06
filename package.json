@@ -3,7 +3,9 @@
   "version": "2.0.0",
   "type": "module",
   "main": "src/index.js",
-  "engines": { "node": ">=20.0.0" },
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js"
@@ -21,6 +23,7 @@
     "helmet": "^8.2.0",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.7.3",
+    "node-cron": "^4.6.0",
     "nodemailer": "^6.9.14",
     "pino": "^9.4.0",
     "qrcode": "^1.5.4",

@@ -1,3 +1,4 @@
+import statusRoutes from "./status.routes.js";
 import { Router } from "express";
 import authRoutes from "./auth.routes.js";
 import adminRoutes from "./admin.routes.js";
@@ -13,4 +14,5 @@ router.use("/whatsapp", whatsappRoutes);
 router.use("/conversation", conversationRoutes);
 router.use("/logs", logsRoutes);
 
+router.use("/status", statusRoutes);
 export default router;
