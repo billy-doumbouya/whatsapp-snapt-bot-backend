@@ -66,6 +66,16 @@ export const updateUser = asyncHandler(async (req, res) => {
   res.json({ user });
 });
 
+export const toggleUser = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.params.id);
+  if (!user) return res.status(404).json({ error: "Utilisateur introuvable" });
+
+  user.isActive = !user.isActive;
+  await user.save();
+
+  res.json({ user: user.toSafeObject?.() || user });
+});
+
 export const deleteUser = asyncHandler(async (req, res) => {
   const user = await User.findByIdAndDelete(req.params.id);
   if (!user) return res.status(404).json({ error: "Utilisateur introuvable" });

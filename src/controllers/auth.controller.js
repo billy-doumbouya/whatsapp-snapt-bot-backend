@@ -39,3 +39,35 @@ export const login = asyncHandler(async (req, res) => {
 export const me = asyncHandler(async (req, res) => {
   res.json({ user: req.user });
 });
+
+export const updateSettings = asyncHandler(async (req, res) => {
+  const allowed = [
+    "geminiPromptTemplate",
+    "publishHourMin",
+    "publishHourMax",
+    "autoGenerate",
+    "generateImage",
+    "geminiThemes",
+    "assistantPrompt",
+    "businessName",
+    "botEnabled",
+    "statusFeatureEnabled",
+  ];
+
+  const updates = {};
+  for (const key of allowed) {
+    if (req.body[key] !== undefined) updates[key] = req.body[key];
+  }
+
+  if (updates.publishHourMin !== undefined && updates.publishHourMax !== undefined) {
+    if (updates.publishHourMin >= updates.publishHourMax) {
+      return res.status(400).json({ error: "L'heure min doit être inférieure à l'heure max" });
+    }
+  }
+
+  const user = await User.findByIdAndUpdate(req.user._id, updates, { new: true }).select(
+    "-password",
+  );
+
+  res.json({ user });
+});

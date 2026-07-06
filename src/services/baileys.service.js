@@ -1,6 +1,7 @@
 import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
+  fetchLatestBaileysVersion,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import qrcode from "qrcode";
@@ -51,15 +52,25 @@ export const getOrCreateSession = async (userId, io) => {
 };
 
 const buildSession = async (sUserId, io) => {
-  const { state, saveCreds } = await useMultiFileAuthState(sessionPath(sUserId));
+  const { state, saveCreds } = await useMultiFileAuthState(
+    sessionPath(sUserId),
+  );
+
+   const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
     auth: state,
     logger: silentLogger,
     printQRInTerminal: false,
+    version,
   });
 
-  const session = { sock, status: STATUSES.INITIALIZING, qr: null, ownJid: null };
+  const session = {
+    sock,
+    status: STATUSES.INITIALIZING,
+    qr: null,
+    ownJid: null,
+  };
   sessions.set(sUserId, session);
 
   sock.ev.on("creds.update", saveCreds);
@@ -78,15 +89,21 @@ const buildSession = async (sUserId, io) => {
       session.status = STATUSES.CONNECTED;
       session.qr = null;
       session.ownJid = sock.user?.id?.split(":")[0] + "@s.whatsapp.net";
-      io?.to(`user:${sUserId}`).emit("wa:status", { status: STATUSES.CONNECTED });
+      io?.to(`user:${sUserId}`).emit("wa:status", {
+        status: STATUSES.CONNECTED,
+      });
       await log("success", "Baileys connecté et prêt", { userId: sUserId });
     }
 
     if (connection === "close") {
       session.status = STATUSES.DISCONNECTED;
       const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      io?.to(`user:${sUserId}`).emit("wa:status", { status: STATUSES.DISCONNECTED });
-      await log("warn", `Baileys déconnecté (code ${statusCode})`, { userId: sUserId });
+      io?.to(`user:${sUserId}`).emit("wa:status", {
+        status: STATUSES.DISCONNECTED,
+      });
+      await log("warn", `Baileys déconnecté (code ${statusCode})`, {
+        userId: sUserId,
+      });
 
       sessions.delete(sUserId);
 
@@ -129,9 +146,7 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
   const remoteJid = msg.key.remoteJid;
   const isFromMe = msg.key.fromMe;
   const text =
-    msg.message.conversation ||
-    msg.message.extendedTextMessage?.text ||
-    "";
+    msg.message.conversation || msg.message.extendedTextMessage?.text || "";
 
   if (!text.trim()) return;
 
@@ -163,15 +178,27 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
     { upsert: true, new: true },
   );
 
-  await Message.create({ userId: sUserId, contactId: contact._id, direction: "in", text });
+  await Message.create({
+    userId: sUserId,
+    contactId: contact._id,
+    direction: "in",
+    text,
+  });
 
   const reply = await generateReply(user, contact._id, text);
 
   await session.sock.sendMessage(remoteJid, { text: reply });
 
-  await Message.create({ userId: sUserId, contactId: contact._id, direction: "out", text: reply });
+  await Message.create({
+    userId: sUserId,
+    contactId: contact._id,
+    direction: "out",
+    text: reply,
+  });
 
-  io?.to(`user:${sUserId}`).emit("conversation:update", { contactId: contact._id });
+  io?.to(`user:${sUserId}`).emit("conversation:update", {
+    contactId: contact._id,
+  });
 };
 
 export const initAllSessions = async (users, io) => {
@@ -179,9 +206,13 @@ export const initAllSessions = async (users, io) => {
     try {
       await getOrCreateSession(user._id.toString(), io);
     } catch (err) {
-      await log("error", `Init session échouée pour ${user.email} : ${err.message}`, {
-        userId: user._id,
-      });
+      await log(
+        "error",
+        `Init session échouée pour ${user.email} : ${err.message}`,
+        {
+          userId: user._id,
+        },
+      );
     }
     await new Promise((r) => setTimeout(r, 1000));
   }
@@ -191,8 +222,14 @@ export const destroySession = async (userId) => {
   const sUserId = userId.toString();
   const session = sessions.get(sUserId);
   if (!session) return;
+
   try {
     await session.sock.logout();
   } catch {}
+
   sessions.delete(sUserId);
+  pendingInits.delete(sUserId); // ← évite aussi de retourner une init fantôme en cours
+
+  // Suppression garantie ici, sans dépendre du timing du handler connection.update
+  await fs.remove(sessionPath(sUserId));
 };
