@@ -24,7 +24,6 @@ const decodeId = (encoded) => {
 
 export const useMongoAuthState = async (userId) => {
   const existing = await WhatsAppAuth.findOne({ userId }).lean();
-
   const storedCreds = existing?.creds
     ? JSON.parse(JSON.stringify(existing.creds), BufferJSON.reviver)
     : null;
@@ -33,7 +32,6 @@ export const useMongoAuthState = async (userId) => {
     : {};
 
   const creds = storedCreds || initAuthCreds();
-
   const keys = {};
   for (const category of Object.keys(storedKeys)) {
     keys[category] = {};
@@ -46,7 +44,7 @@ export const useMongoAuthState = async (userId) => {
     const serialized = JSON.parse(JSON.stringify(creds, BufferJSON.replacer));
     await WhatsAppAuth.findOneAndUpdate(
       { userId },
-      { creds: serialized },
+      { $set: { creds: serialized } }, // ← $set : ne touche que ce champ, ne remplace plus tout le document
       { upsert: true },
     );
   };
@@ -64,7 +62,7 @@ export const useMongoAuthState = async (userId) => {
     );
     await WhatsAppAuth.findOneAndUpdate(
       { userId },
-      { keys: serialized },
+      { $set: { keys: serialized } }, // ← $set : ne touche que ce champ, ne remplace plus tout le document
       { upsert: true },
     );
   };
