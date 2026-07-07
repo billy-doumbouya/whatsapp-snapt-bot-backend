@@ -1,20 +1,18 @@
 import makeWASocket, {
-  useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
   downloadMediaMessage,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import qrcode from "qrcode";
-import path from "path";
-import fs from "fs-extra";
 import pino from "pino";
-import { env } from "../config/env.js";
 import { log } from "../utils/logger.js";
 import User from "../models/User.js";
 import Contact from "../models/Contact.js";
 import Message from "../models/Message.js";
+import WhatsAppAuth from "../models/WhatsAppAuth.js";
 import { generateReply, transcribeAudio } from "./ai.service.js";
+import { useMongoAuthState } from "./mongoAuthState.service.js";
 
 const STATUSES = {
   INITIALIZING: "initializing",
@@ -23,13 +21,8 @@ const STATUSES = {
   DISCONNECTED: "disconnected",
 };
 
-const AUTH_PATH = path.resolve(env.waDataPath);
-fs.ensureDirSync(AUTH_PATH);
-
 const sessions = new Map(); // userId -> { sock, status, qr, ownJid }
 const pendingInits = new Map();
-
-const sessionPath = (userId) => path.join(AUTH_PATH, `session-${userId}`);
 
 const silentLogger = pino({ level: "silent" });
 
@@ -53,9 +46,7 @@ export const getOrCreateSession = async (userId, io) => {
 };
 
 const buildSession = async (sUserId, io) => {
-  const { state, saveCreds } = await useMultiFileAuthState(
-    sessionPath(sUserId),
-  );
+  const { state, saveCreds } = await useMongoAuthState(sUserId);
 
   const { version } = await fetchLatestBaileysVersion();
 
@@ -110,7 +101,7 @@ const buildSession = async (sUserId, io) => {
       sessions.delete(sUserId);
 
       if (statusCode === DisconnectReason.loggedOut) {
-        await fs.remove(sessionPath(sUserId));
+        await WhatsAppAuth.deleteOne({ userId: sUserId });
         await log("warn", "Session invalidée (logout), nouveau QR requis", {
           userId: sUserId,
         });
@@ -220,27 +211,6 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
           reuploadRequest: session.sock.updateMediaMessage,
         },
       );
-      const mimeType = msg.message.audioMessage?.mimetype || "audio/ogg";
-      const transcript = await transcribeAudio(buffer, mimeType);
-      text = (transcript || "").trim();
-      if (!text) mediaFallbackReason = "audio";
-    } catch (err) {
-      await log("error", `Erreur transcription audio : ${err.message}`, {
-        userId: sUserId,
-      });
-      mediaFallbackReason = "audio";
-    }
-  } else if (messageType === "audio") {
-    try {
-      const buffer = await downloadMediaMessage(
-        msg,
-        "buffer",
-        {},
-        {
-          logger: silentLogger,
-          reuploadRequest: session.sock.updateMediaMessage,
-        },
-      );
       const rawMimeType = msg.message.audioMessage?.mimetype || "audio/ogg";
       const mimeType = rawMimeType.split(";")[0].trim(); // ← nettoie "audio/ogg; codecs=opus" → "audio/ogg"
       const transcript = await transcribeAudio(buffer, mimeType);
@@ -266,13 +236,10 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
     await log(
       "info",
       `DEBUG self-chat : remoteJid="${remoteJid}" vs ownJid="${session.ownJid}"`,
-      {
-        userId: sUserId,
-      },
+      { userId: sUserId },
     );
   }
 
-  
   if (isSelfChat && (normalized === "stop" || normalized === "start")) {
     const botEnabled = normalized === "start";
     await User.findByIdAndUpdate(sUserId, { botEnabled });
@@ -359,9 +326,7 @@ export const initAllSessions = async (users, io) => {
       await log(
         "error",
         `Init session échouée pour ${user.email} : ${err.message}`,
-        {
-          userId: user._id,
-        },
+        { userId: user._id },
       );
     }
     await new Promise((r) => setTimeout(r, 1000));
@@ -380,5 +345,5 @@ export const destroySession = async (userId) => {
   sessions.delete(sUserId);
   pendingInits.delete(sUserId);
 
-  await fs.remove(sessionPath(sUserId));
+  await WhatsAppAuth.deleteOne({ userId: sUserId });
 };
