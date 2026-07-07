@@ -227,7 +227,10 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
     mediaFallbackReason = "unsupported";
   }
 
-  const normalized = text.trim().toLowerCase();
+  const normalized = text
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z]/g, ""); // ← retire ponctuation, emoji, caractères invisibles ; ne garde que les lettres
 
   // ─── Canal de contrôle : le propriétaire s'écrit à lui-même ───
   const isSelfChat = isFromMe && remoteJid === session.ownJid;
@@ -235,7 +238,7 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
   if (isFromMe) {
     await log(
       "info",
-      `DEBUG self-chat : remoteJid="${remoteJid}" vs ownJid="${session.ownJid}"`,
+      `DEBUG texte reçu : raw="${JSON.stringify(text)}" normalized="${JSON.stringify(normalized)}" remoteJid="${remoteJid}" ownJid="${session.ownJid}" isSelfChat=${isSelfChat}`,
       { userId: sUserId },
     );
   }
