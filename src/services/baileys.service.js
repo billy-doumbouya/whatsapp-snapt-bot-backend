@@ -34,10 +34,8 @@ export const getSessionStatus = (userId) => {
 
 export const getOrCreateSession = async (userId, io) => {
   const sUserId = userId.toString();
-
   if (sessions.has(sUserId)) return sessions.get(sUserId);
   if (pendingInits.has(sUserId)) return pendingInits.get(sUserId);
-
   const initPromise = buildSession(sUserId, io).finally(() =>
     pendingInits.delete(sUserId),
   );
@@ -47,9 +45,7 @@ export const getOrCreateSession = async (userId, io) => {
 
 const buildSession = async (sUserId, io) => {
   const { state, saveCreds } = await useMongoAuthState(sUserId);
-
   const { version } = await fetchLatestBaileysVersion();
-
   const sock = makeWASocket({
     auth: state,
     logger: silentLogger,
@@ -57,7 +53,6 @@ const buildSession = async (sUserId, io) => {
     version,
     markOnlineOnConnect: false,
   });
-
   const session = {
     sock,
     status: STATUSES.INITIALIZING,
@@ -70,14 +65,12 @@ const buildSession = async (sUserId, io) => {
 
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
-
     if (qr) {
       session.qr = await qrcode.toDataURL(qr);
       session.status = STATUSES.QR_READY;
       io?.to(`user:${sUserId}`).emit("wa:qr", { qr: session.qr });
       await log("info", "QR code généré, scan requis", { userId: sUserId });
     }
-
     if (connection === "open") {
       session.status = STATUSES.CONNECTED;
       session.qr = null;
@@ -87,7 +80,6 @@ const buildSession = async (sUserId, io) => {
       });
       await log("success", "Baileys connecté et prêt", { userId: sUserId });
     }
-
     if (connection === "close") {
       session.status = STATUSES.DISCONNECTED;
       const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
@@ -97,9 +89,7 @@ const buildSession = async (sUserId, io) => {
       await log("warn", `Baileys déconnecté (code ${statusCode})`, {
         userId: sUserId,
       });
-
       sessions.delete(sUserId);
-
       if (statusCode === DisconnectReason.loggedOut) {
         await WhatsAppAuth.deleteOne({ userId: sUserId });
         await log("warn", "Session invalidée (logout), nouveau QR requis", {
@@ -107,8 +97,6 @@ const buildSession = async (sUserId, io) => {
         });
         return;
       }
-
-      // Reconnexion auto sur toute autre déconnexion (réseau, etc.)
       setTimeout(() => getOrCreateSession(sUserId, io), 5000);
     }
   });
@@ -166,7 +154,7 @@ const buildFallbackMessage = (businessName, reason) => {
 
 /**
  * Traite un message entrant.
- * - Si c'est le propriétaire qui s'écrit "stop"/"start" à lui-même : bascule botEnabled
+ * - Si le propriétaire envoie "!stop"/"!start" (commande de contrôle) : bascule botEnabled
  * - Si groupe : ignore sauf mention explicite du numéro du bot
  * - Si image/vidéo avec légende : répond selon la légende
  * - Si image/vidéo sans légende : message de repli (pas de traitement d'image)
@@ -199,7 +187,7 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
     if (!text.trim()) mediaFallbackReason = "image";
   } else if (messageType === "video") {
     text = msg.message.videoMessage?.caption || "";
-    if (!text.trim()) mediaFallbackReason = "image"; // même repli que les images
+    if (!text.trim()) mediaFallbackReason = "image";
   } else if (messageType === "audio") {
     try {
       const buffer = await downloadMediaMessage(
@@ -212,7 +200,7 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
         },
       );
       const rawMimeType = msg.message.audioMessage?.mimetype || "audio/ogg";
-      const mimeType = rawMimeType.split(";")[0].trim(); // ← nettoie "audio/ogg; codecs=opus" → "audio/ogg"
+      const mimeType = rawMimeType.split(";")[0].trim();
       const transcript = await transcribeAudio(buffer, mimeType);
       text = (transcript || "").trim();
       if (!text) mediaFallbackReason = "audio";
@@ -223,28 +211,21 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
       mediaFallbackReason = "audio";
     }
   } else {
-    // documents, stickers, etc. : non supportés
     mediaFallbackReason = "unsupported";
   }
 
   const normalized = text
     .trim()
     .toLowerCase()
-    .replace(/[^a-z]/g, ""); // ← retire ponctuation, emoji, caractères invisibles ; ne garde que les lettres
+    .replace(/[^a-z!]/g, ""); // ← garde les lettres ET le "!", retire ponctuation/emoji/caractères invisibles
 
-  // ─── Canal de contrôle : le propriétaire s'écrit à lui-même ───
-  const isSelfChat = isFromMe && remoteJid === session.ownJid;
-
-  if (isFromMe) {
-    await log(
-      "info",
-      `DEBUG texte reçu : raw="${JSON.stringify(text)}" normalized="${JSON.stringify(normalized)}" remoteJid="${remoteJid}" ownJid="${session.ownJid}" isSelfChat=${isSelfChat}`,
-      { userId: sUserId },
-    );
-  }
-
-  if (isSelfChat && (normalized === "stop" || normalized === "start")) {
-    const botEnabled = normalized === "start";
+  // ─── Canal de contrôle : commandes explicites envoyées par toi-même ───
+  // Préfixe "!" choisi pour éviter tout déclenchement accidentel dans une
+  // conversation normale. isFromMe seul suffit (pas de comparaison stricte du
+  // JID) car WhatsApp peut livrer un message de "Vous-même" sous deux formats
+  // différents (@s.whatsapp.net ou @lid) selon le contexte.
+  if (isFromMe && (normalized === "!stop" || normalized === "!start")) {
+    const botEnabled = normalized === "!start";
     await User.findByIdAndUpdate(sUserId, { botEnabled });
     io?.to(`user:${sUserId}`).emit("bot:status", { botEnabled });
     await log(
@@ -296,7 +277,7 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
     return;
   }
 
-  if (!text.trim()) return; // sécurité supplémentaire, ne devrait plus arriver ici
+  if (!text.trim()) return;
 
   await Message.create({
     userId: sUserId,
@@ -340,13 +321,10 @@ export const destroySession = async (userId) => {
   const sUserId = userId.toString();
   const session = sessions.get(sUserId);
   if (!session) return;
-
   try {
     await session.sock.logout();
   } catch {}
-
   sessions.delete(sUserId);
   pendingInits.delete(sUserId);
-
   await WhatsAppAuth.deleteOne({ userId: sUserId });
 };
