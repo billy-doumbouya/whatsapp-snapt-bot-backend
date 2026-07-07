@@ -2,8 +2,16 @@ import mongoose from "mongoose";
 
 const messageSchema = new mongoose.Schema(
   {
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-    contactId: { type: mongoose.Schema.Types.ObjectId, ref: "Contact", required: true },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    contactId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Contact",
+      required: true,
+    },
     direction: { type: String, enum: ["in", "out"], required: true },
     text: { type: String, required: true },
   },
