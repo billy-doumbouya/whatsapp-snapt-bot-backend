@@ -261,6 +261,18 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
 
   // ─── Canal de contrôle : le propriétaire s'écrit à lui-même ───
   const isSelfChat = isFromMe && remoteJid === session.ownJid;
+
+  if (isFromMe) {
+    await log(
+      "info",
+      `DEBUG self-chat : remoteJid="${remoteJid}" vs ownJid="${session.ownJid}"`,
+      {
+        userId: sUserId,
+      },
+    );
+  }
+
+  
   if (isSelfChat && (normalized === "stop" || normalized === "start")) {
     const botEnabled = normalized === "start";
     await User.findByIdAndUpdate(sUserId, { botEnabled });
