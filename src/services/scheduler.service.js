@@ -7,7 +7,11 @@ import { log } from "../utils/logger.js";
 
 const randomScheduleToday = (hourMin, hourMax) => {
   const now = new Date();
-  const hour = Math.floor(Math.random() * (hourMax - hourMin + 1)) + hourMin;
+  // Sécurité au cas où les heures seraient mal configurées malgré les verrous
+  const min = Math.min(hourMin, hourMax);
+  const max = Math.max(hourMin, hourMax);
+
+  const hour = Math.floor(Math.random() * (max - min + 1)) + min;
   const minute = Math.floor(Math.random() * 60);
   const target = new Date(now);
   target.setHours(hour, minute, 0, 0);
@@ -24,7 +28,7 @@ const findTodayPost = async (userId) => {
   return Post.findOne({
     userId,
     scheduledAt: { $gte: startOfDay, $lte: endOfDay },
-    status: { $in: ["draft", "scheduled"] },
+    status: { $in: ["draft", "scheduled", "publishing", "published"] }, // 👈 Ajouté pour éviter de recréer un doublon si un post est déjà publié ou en cours
   });
 };
 
@@ -48,18 +52,18 @@ const generateDraftForUser = async (user) => {
       scheduledAt,
     });
 
-    user.themeIndex = (user.themeIndex + 1) % user.geminiThemes.length;
+    // 🛡️ Protection anti-crash (Point 3) : Évite le modulo par 0 si le tableau est vide
+    const totalThemes = user.geminiThemes?.length || 0;
+    user.themeIndex = totalThemes > 0 ? (user.themeIndex + 1) % totalThemes : 0;
     await user.save();
 
     await log(
       "success",
       `Post généré et schedulé pour ${scheduledAt.toLocaleTimeString("fr-FR")}`,
-      {
-        userId: user._id,
-      },
+      { userId: user._id },
     );
   } catch (err) {
-    await log("error", `Génération échouée : ${err.message}`, {
+    await log("error", `Génération auto échouée : ${err.message}`, {
       userId: user._id,
     });
   }
@@ -99,23 +103,32 @@ const publishDuePosts = async (io) => {
       post.errorMessage = err.message;
       await post.save();
 
-      await log("error", `Publication échouée : ${err.message}`, {
-        userId: user._id,
-        postId: post._id,
-      });
+      // 🚨 ALERTING CRITIQUE (Point 8) : Alerte de déconnexion Baileys ou échec d'envoi
+      await log(
+        "error",
+        `CRITICAL: Publication échouée pour ${user.email} -> ${err.message}`,
+        {
+          userId: user._id,
+          postId: post._id,
+          slackWebhookAlert: true, // Un flag pour ton logger pour router vers Discord/Slack si nécessaire
+        },
+      );
     }
   }
 };
 
 export const startScheduler = (io) => {
+  // Tâche Cron quotidienne à 06h00 pour la génération des drafts
   cron.schedule("0 6 * * *", async () => {
     const users = await User.find({
       isActive: true,
       statusFeatureEnabled: true,
+      autoGenerate: true, // 👈 Ajouté : Respecte le choix de l'utilisateur de l'UI
     });
     for (const user of users) await generateDraftForUser(user);
   });
 
+  // Tâche Cron toutes les 5 minutes pour dépiler les posts planifiés
   cron.schedule("*/5 * * * *", async () => {
     await publishDuePosts(io);
   });
@@ -146,7 +159,9 @@ export const manualGenerate = async (userId) => {
     isManual: true,
   });
 
-  user.themeIndex = (user.themeIndex + 1) % user.geminiThemes.length;
+  // 🛡️ Protection anti-crash
+  const totalThemes = user.geminiThemes?.length || 0;
+  user.themeIndex = totalThemes > 0 ? (user.themeIndex + 1) % totalThemes : 0;
   await user.save();
 
   return post;
