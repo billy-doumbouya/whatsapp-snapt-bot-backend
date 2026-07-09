@@ -26,17 +26,11 @@ export const env = {
   port: process.env.PORT || 3001,
   mongoUri: required("MONGO_URI"),
   jwtSecret: required("JWT_SECRET"),
-
-  // Conservé pour compatibilité avec le code existant (ex: CORS actuel).
   frontendUrl: frontendUrlsRaw,
-
-  // À utiliser pour le CORS : tableau d'origines autorisées.
   frontendUrls,
-
-  // À utiliser pour tout lien affiché à un utilisateur (emails, etc.).
   publicAppUrl,
-
   geminiApiKey: required("GEMINI_API_KEY"),
+  wifeWaId: process.env.WIFE_WA_ID || null, // ← ajouté
   smtp: {
     host: required("SMTP_HOST"),
     port: parseInt(process.env.SMTP_PORT || "587", 10),

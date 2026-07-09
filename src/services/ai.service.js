@@ -77,16 +77,22 @@ export const transcribeAudio = async (audioBuffer, mimeType) => {
   });
 };
 
-export const generateReply = async (user, contactId, incomingText) => {
-  const history = await Message.find({ contactId })
+export const generateReply = async (user, contact, incomingText) => {
+  const history = await Message.find({ contactId: contact._id })
     .sort({ createdAt: -1 })
     .limit(HISTORY_LIMIT)
     .lean();
 
-  const systemPrompt = user.assistantPrompt.replace(
+  let systemPrompt = user.assistantPrompt.replace(
     "{{businessName}}",
     user.businessName || "notre entreprise",
   );
+
+  if (contact.relationship === "wife") {
+    systemPrompt += `\n\nATTENTION : cette conversation est avec l'épouse du propriétaire de ce compte, pas une cliente. Adopte un ton chaleureux, personnel et complice, jamais commercial.`;
+  } else if (contact.name) {
+    systemPrompt += `\n\nLe client s'appelle ${contact.name}. Reste professionnel, et adresse-toi à lui/elle par son prénom quand le contexte de la conversation s'y prête naturellement (accueil, remerciement, conclusion) — sans le répéter à chaque message, pour rester naturel.`;
+  }
 
   const conversationText = history
     .reverse()

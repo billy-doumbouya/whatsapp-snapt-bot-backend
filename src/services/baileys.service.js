@@ -7,6 +7,7 @@ import { Boom } from "@hapi/boom";
 import qrcode from "qrcode";
 import pino from "pino";
 import { log } from "../utils/logger.js";
+import { env } from "../config/env.js";
 import User from "../models/User.js";
 import Contact from "../models/Contact.js";
 import Message from "../models/Message.js";
@@ -21,7 +22,7 @@ const STATUSES = {
   DISCONNECTED: "disconnected",
 };
 
-const sessions = new Map(); // userId -> { sock, status, qr, ownJid }
+const sessions = new Map(); // userId -> { sock, status, qr, ownJid, processedMsgIds }
 const pendingInits = new Map();
 
 const silentLogger = pino({ level: "silent" });
@@ -43,6 +44,15 @@ export const getOrCreateSession = async (userId, io) => {
   return initPromise;
 };
 
+/** Normalise un numéro WhatsApp pour comparaison fiable (retire suffixe JID, +, espaces, tirets) */
+const normalizePhone = (value) => {
+  if (!value) return "";
+  return value
+    .toString()
+    .replace("@s.whatsapp.net", "")
+    .replace(/[^0-9]/g, ""); // garde uniquement les chiffres
+};
+
 const buildSession = async (sUserId, io) => {
   const { state, saveCreds } = await useMongoAuthState(sUserId);
   const { version } = await fetchLatestBaileysVersion();
@@ -58,6 +68,7 @@ const buildSession = async (sUserId, io) => {
     status: STATUSES.INITIALIZING,
     qr: null,
     ownJid: null,
+    processedMsgIds: new Set(), // ← anti-doublon (fix : réponses/fallback dupliqués)
   };
   sessions.set(sUserId, session);
 
@@ -101,8 +112,23 @@ const buildSession = async (sUserId, io) => {
     }
   });
 
-  sock.ev.on("messages.upsert", async ({ messages }) => {
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    // On ignore les rejeux d'historique/resynchro (reconnect instable sur VPS) :
+    // seul "notify" correspond à un message live réellement nouveau.
+    if (type !== "notify") return;
+
     for (const msg of messages) {
+      const msgId = msg.key?.id;
+      if (msgId) {
+        if (session.processedMsgIds.has(msgId)) continue; // déjà traité, on saute
+        session.processedMsgIds.add(msgId);
+        // évite une fuite mémoire sur une session longue durée
+        if (session.processedMsgIds.size > 500) {
+          session.processedMsgIds.delete(
+            session.processedMsgIds.values().next().value,
+          );
+        }
+      }
       try {
         await handleIncomingMessage(sUserId, session, msg, io);
       } catch (err) {
@@ -241,10 +267,18 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
   const user = await User.findById(sUserId);
   if (!user || !user.botEnabled) return; // bot coupé : silence total
 
-  // ─── Trouver/créer le contact ───
+  // ─── Trouver/créer le contact + capturer son nom + détecter l'épouse ───
+  const pushName = msg.pushName?.trim();
+  const isWife =
+    env.wifeWaId && normalizePhone(remoteJid) === normalizePhone(env.wifeWaId);
+
   const contact = await Contact.findOneAndUpdate(
     { userId: sUserId, waId: remoteJid },
-    { lastInteractionAt: new Date() },
+    {
+      lastInteractionAt: new Date(),
+      ...(pushName ? { name: pushName } : {}),
+      relationship: isWife ? "wife" : null,
+    },
     { upsert: true, new: true },
   );
 
@@ -286,7 +320,7 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
     text,
   });
 
-  const reply = await generateReply(user, contact._id, text);
+  const reply = await generateReply(user, contact, text);
 
   await session.sock.sendMessage(remoteJid, { text: reply });
 
