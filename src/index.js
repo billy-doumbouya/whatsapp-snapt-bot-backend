@@ -18,9 +18,7 @@ import { log } from "./utils/logger.js";
 const app = express();
 const httpServer = createServer(app);
 
-const allowedOrigins = env.frontendUrl
-  .split(",")
-  .map((u) => u.trim().replace(/\/$/, ""));
+const allowedOrigins = env.frontendUrls.map((u) => u.replace(/\/$/, ""));
 
 app.use(
   cors({
