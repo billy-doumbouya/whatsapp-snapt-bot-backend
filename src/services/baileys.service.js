@@ -444,3 +444,6 @@ export const initAllSessions = async (users, io) => {
     await new Promise((r) => setTimeout(r, 1_000));
   }
 };
+
+
+export { sessions };
