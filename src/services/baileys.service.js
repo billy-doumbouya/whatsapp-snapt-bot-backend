@@ -170,10 +170,7 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
   }
 
   // 4. Commandes de contrôle : !stop / !start (propriétaire uniquement)
-  const normalized = text
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z!]/g, "");
+  const normalized = text.trim().toLowerCase().replace(/[^a-z!]/g, "");
 
   if (isFromMe && (normalized === "!stop" || normalized === "!start")) {
     const botEnabled = normalized === "!start";
@@ -201,27 +198,28 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
   if (!user?.botEnabled) return;
 
   // 8. Trouver ou créer le contact
+  //    → Les waId sont désormais au format @lid (nouveau format WhatsApp).
+  //      La comparaison par numéro de téléphone (WIFE_WA_ID) ne fonctionne plus.
+  //    → On préserve le champ `relationship` défini manuellement (wife, friend,
+  //      family, vip) pour ne pas l'écraser à chaque message entrant.
   const pushName = msg.pushName?.trim() || null;
-  const isWife = env.wifeWaId
-    ? normalizePhone(remoteJid) === normalizePhone(env.wifeWaId)
-    : false;
+
+  const existingContact = await Contact.findOne({ userId: sUserId, waId: remoteJid });
 
   const contact = await Contact.findOneAndUpdate(
     { userId: sUserId, waId: remoteJid },
     {
       lastInteractionAt: new Date(),
       ...(pushName ? { name: pushName } : {}),
-      relationship: isWife ? "wife" : null,
+      // Ne jamais écraser une relation définie manuellement
+      ...(existingContact?.relationship ? {} : { relationship: null }),
     },
     { upsert: true, new: true },
   );
 
   // 9. Média non exploitable → message de repli (image sans légende, audio non transcrit)
   if (mediaFallbackReason) {
-    const fallback = buildFallbackMessage(
-      user.businessName,
-      mediaFallbackReason,
-    );
+    const fallback = buildFallbackMessage(user.businessName, mediaFallbackReason);
 
     await Message.create({
       userId: sUserId,
@@ -236,9 +234,7 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
       direction: "out",
       text: fallback,
     });
-    io?.to(`user:${sUserId}`).emit("conversation:update", {
-      contactId: contact._id,
-    });
+    io?.to(`user:${sUserId}`).emit("conversation:update", { contactId: contact._id });
     return;
   }
 
@@ -261,11 +257,8 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
     direction: "out",
     text: reply,
   });
-  io?.to(`user:${sUserId}`).emit("conversation:update", {
-    contactId: contact._id,
-  });
+  io?.to(`user:${sUserId}`).emit("conversation:update", { contactId: contact._id });
 };
-
 // ─────────────────────────────────────────────
 // Construction de session Baileys
 // ─────────────────────────────────────────────
