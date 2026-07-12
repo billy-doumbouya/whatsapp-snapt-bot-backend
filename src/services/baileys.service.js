@@ -15,6 +15,7 @@ import Message from "../models/Message.js";
 import WhatsAppAuth from "../models/WhatsAppAuth.js";
 import { generateReply, transcribeAudio } from "./ai.service.js";
 import { useMongoAuthState } from "./mongoAuthState.service.js";
+import { humanDelay } from "../helpers/humanDelay.js";
 
 // ─────────────────────────────────────────────
 // Constantes
@@ -111,10 +112,6 @@ const buildFallbackMessage = (businessName, reason) => {
   return base;
 };
 
-// ─────────────────────────────────────────────
-// Gestion des messages entrants
-// ─────────────────────────────────────────────
-
 const handleIncomingMessage = async (sUserId, session, msg, io) => {
   if (!msg.message) return;
 
@@ -170,7 +167,10 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
   }
 
   // 4. Commandes de contrôle : !stop / !start (propriétaire uniquement)
-  const normalized = text.trim().toLowerCase().replace(/[^a-z!]/g, "");
+  const normalized = text
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z!]/g, "");
 
   if (isFromMe && (normalized === "!stop" || normalized === "!start")) {
     const botEnabled = normalized === "!start";
@@ -186,6 +186,7 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
 
   // 5. Accusé de réception pour les messages texte du propriétaire
   if (isFromMe && messageType === "text" && text.trim()) {
+    await humanDelay();
     await session.sock.sendMessage(remoteJid, { text: "✅ Reçu." });
     return;
   }
@@ -198,20 +199,21 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
   if (!user?.botEnabled) return;
 
   // 8. Trouver ou créer le contact
-  //    → Les waId sont désormais au format @lid (nouveau format WhatsApp).
-  //      La comparaison par numéro de téléphone (WIFE_WA_ID) ne fonctionne plus.
-  //    → On préserve le champ `relationship` défini manuellement (wife, friend,
-  //      family, vip) pour ne pas l'écraser à chaque message entrant.
+  //    → Les waId sont au format @lid — comparaison par numéro impossible.
+  //    → On préserve le champ `relationship` défini manuellement.
   const pushName = msg.pushName?.trim() || null;
 
-  const existingContact = await Contact.findOne({ userId: sUserId, waId: remoteJid });
+  const existingContact = await Contact.findOne({
+    userId: sUserId,
+    waId: remoteJid,
+  });
 
   const contact = await Contact.findOneAndUpdate(
     { userId: sUserId, waId: remoteJid },
     {
       lastInteractionAt: new Date(),
       ...(pushName ? { name: pushName } : {}),
-      // Ne jamais écraser une relation définie manuellement
+      // Ne jamais écraser une relation définie manuellement (wife, friend, family, vip)
       ...(existingContact?.relationship ? {} : { relationship: null }),
     },
     { upsert: true, new: true },
@@ -219,7 +221,10 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
 
   // 9. Média non exploitable → message de repli (image sans légende, audio non transcrit)
   if (mediaFallbackReason) {
-    const fallback = buildFallbackMessage(user.businessName, mediaFallbackReason);
+    const fallback = buildFallbackMessage(
+      user.businessName,
+      mediaFallbackReason,
+    );
 
     await Message.create({
       userId: sUserId,
@@ -227,6 +232,7 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
       direction: "in",
       text: `[${messageType}] (non traité)`,
     });
+    await humanDelay();
     await session.sock.sendMessage(remoteJid, { text: fallback });
     await Message.create({
       userId: sUserId,
@@ -234,7 +240,9 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
       direction: "out",
       text: fallback,
     });
-    io?.to(`user:${sUserId}`).emit("conversation:update", { contactId: contact._id });
+    io?.to(`user:${sUserId}`).emit("conversation:update", {
+      contactId: contact._id,
+    });
     return;
   }
 
@@ -250,6 +258,7 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
 
   const reply = await generateReply(user, contact, text);
 
+  await humanDelay();
   await session.sock.sendMessage(remoteJid, { text: reply });
   await Message.create({
     userId: sUserId,
@@ -257,7 +266,9 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
     direction: "out",
     text: reply,
   });
-  io?.to(`user:${sUserId}`).emit("conversation:update", { contactId: contact._id });
+  io?.to(`user:${sUserId}`).emit("conversation:update", {
+    contactId: contact._id,
+  });
 };
 // ─────────────────────────────────────────────
 // Construction de session Baileys
@@ -437,6 +448,5 @@ export const initAllSessions = async (users, io) => {
     await new Promise((r) => setTimeout(r, 1_000));
   }
 };
-
 
 export { sessions };
