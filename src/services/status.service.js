@@ -12,7 +12,8 @@ import { log } from "../utils/logger.js";
  */
 const fetchImageBuffer = async (url) => {
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`Téléchargement image échoué (${res.status}) : ${url}`);
+  if (!res.ok)
+    throw new Error(`Téléchargement image échoué (${res.status}) : ${url}`);
   return Buffer.from(await res.arrayBuffer());
 };
 
@@ -68,7 +69,11 @@ const waitForConnected = (sUserId, timeoutMs = 15_000) =>
  * numéros classiques (@s.whatsapp.net). Les deux formats sont acceptés
  * dans statusJidList depuis Baileys 6.x.
  */
-export const publishStatusViaBaileys = async (userId, { text, imageUrl }, io) => {
+export const publishStatusViaBaileys = async (
+  userId,
+  { text, imageUrl },
+  io,
+) => {
   const sUserId = userId.toString();
 
   // 1. S'assurer que la session existe
@@ -78,14 +83,21 @@ export const publishStatusViaBaileys = async (userId, { text, imageUrl }, io) =>
   const session = await waitForConnected(sUserId);
 
   // 3. Récupérer tous les contacts — accepter @s.whatsapp.net ET @lid
-  const contacts = await Contact.find({ userId: sUserId }).select("waId").lean();
+  const contacts = await Contact.find({ userId: sUserId })
+    .select("waId")
+    .lean();
 
+  // Après avoir récupéré session et contacts, ajouter le JID du propriétaire
   const statusJidList = contacts
     .map((c) => c.waId?.trim())
-    .filter((jid) => jid && (
-      jid.endsWith("@s.whatsapp.net") ||
-      jid.endsWith("@lid")
-    ));
+    .filter(
+      (jid) => jid && (jid.endsWith("@s.whatsapp.net") || jid.endsWith("@lid")),
+    );
+
+  // ← Ajouter ceci : inclure son propre JID
+  if (session.ownJid && !statusJidList.includes(session.ownJid)) {
+    statusJidList.push(session.ownJid);
+  }
 
   if (statusJidList.length === 0) {
     await log(
