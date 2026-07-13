@@ -78,7 +78,7 @@ const generateWithFallback = async (body) => {
  * - "vip"     → ton professionnel mais avec attention particulière
  * - null      → ton professionnel standard (client par défaut)
  */
-const buildSystemPrompt = (user, contact) => {
+const buildSystemPrompt = (user, contact, businessMode = false) => {
   const businessName = user.businessName || "notre entreprise";
   const base = (user.assistantPrompt || "Tu es l'assistant de {{businessName}}. Réponds de façon concise, professionnelle et utile.")
     .replace("{{businessName}}", businessName);
@@ -129,13 +129,54 @@ CONTEXTE : Client VIP — traite cette conversation avec une attention et une r�
   }
 
   // ── Client standard (par défaut) ──
-  if (name) {
-    return `${base}
+  if (!relationship) {
+    if (businessMode) {
+      if (name) {
+        return `${base}
 
 Le client s'appelle ${name}. Reste professionnel et adresse-toi à lui/elle par son prénom uniquement aux moments clés (accueil, remerciement, conclusion) — sans le répéter à chaque message pour rester naturel.`;
+      }
+      return base;
+    }
+
+    const friendlyBase = (user.assistantFriendlyPrompt || `Tu es un assistant amical pour ${businessName}. Réponds de façon chaleureuse, humaine et conversationnelle, sans ton commercial.`).replace("{{businessName}}", businessName);
+    if (name) {
+      return `${friendlyBase}
+
+Le client s'appelle ${name}. Reste naturel et chaleureux, mentionne son prénom seulement aux moments clés.`;
+    }
+    return friendlyBase;
   }
 
   return base;
+};
+
+// Simple détection d'intention business à partir du texte
+const BUSINESS_KEYWORDS = [
+  "prix",
+  "tarif",
+  "devis",
+  "commande",
+  "acheter",
+  "vente",
+  "contrat",
+  "facture",
+  "service",
+  "rdv",
+  "rendez",
+  "disponible",
+  "produit",
+  "coût",
+  "payer",
+  "paiement",
+  "livraison",
+  "budget",
+];
+
+const isBusinessIntent = (text) => {
+  if (!text) return false;
+  const t = text.toLowerCase();
+  return BUSINESS_KEYWORDS.some((k) => t.includes(k));
 };
 
 // ─────────────────────────────────────────────
@@ -172,12 +213,14 @@ export const generateReply = async (user, contact, incomingText) => {
     .limit(HISTORY_LIMIT)
     .lean();
 
-  const systemPrompt = buildSystemPrompt(user, contact);
-
   const conversationText = history
     .reverse()
     .map((m) => `${m.direction === "in" ? "Contact" : "Assistant"} : ${m.text}`)
     .join("\n");
+
+  const combined = `${conversationText}\n${incomingText}`;
+  const businessMode = isBusinessIntent(combined);
+  const systemPrompt = buildSystemPrompt(user, contact, businessMode);
 
   const prompt = `Historique récent :\n${conversationText}\n\nContact : ${incomingText}\nAssistant :`;
 

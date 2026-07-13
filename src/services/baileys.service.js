@@ -9,6 +9,7 @@ import qrcode from "qrcode";
 import pino from "pino";
 
 import { log } from "../utils/logger.js";
+import { env } from "../config/env.js";
 import User from "../models/User.js";
 import Contact from "../models/Contact.js";
 import Message from "../models/Message.js";
@@ -159,10 +160,13 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
   const normalized = text
     .trim()
     .toLowerCase()
-    .replace(/[^a-z!]/g, "");
+    .replace(/[^a-z!.]/g, "");
 
-  if (isFromMe && (normalized === "!stop" || normalized === "!start")) {
-    const botEnabled = normalized === "!start";
+  if (
+    isFromMe &&
+    (normalized === "!stop" || normalized === "!start" || normalized === ".stop" || normalized === ".start")
+  ) {
+    const botEnabled = normalized === "!start" || normalized === ".start";
     await User.findByIdAndUpdate(sUserId, { botEnabled });
     io?.to(`user:${sUserId}`).emit("bot:status", { botEnabled });
     await log(
@@ -170,10 +174,7 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
       `Bot ${botEnabled ? "réactivé" : "mis en pause"} via commande WhatsApp`,
       { userId: sUserId },
     );
-    return;
-  }
-
-  if (isFromMe && messageType === "text" && text.trim()) {
+    // Confirmation uniquement envoyée au chat qui a émis la commande
     await humanDelay();
     await session.sock.sendMessage(remoteJid, { text: "✅ Reçu." });
     return;
@@ -191,12 +192,22 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
     waId: remoteJid,
   });
 
+  const remotePhone = normalizePhone(remoteJid);
+  const wifeWaId = env.wifeWaId || null;
+  const isWife = wifeWaId && normalizePhone(wifeWaId) === remotePhone;
+
+  const relationshipField = existingContact?.relationship
+    ? {}
+    : isWife
+    ? { relationship: "wife" }
+    : { relationship: null };
+
   const contact = await Contact.findOneAndUpdate(
     { userId: sUserId, waId: remoteJid },
     {
       lastInteractionAt: new Date(),
       ...(pushName ? { name: pushName } : {}),
-      ...(existingContact?.relationship ? {} : { relationship: null }),
+      ...relationshipField,
     },
     { upsert: true, new: true },
   );
