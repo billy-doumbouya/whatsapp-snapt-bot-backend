@@ -192,9 +192,20 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
     waId: remoteJid,
   });
 
-  const remotePhone = normalizePhone(remoteJid);
-  const wifeWaId = env.wifeWaId || null;
-  const isWife = wifeWaId && normalizePhone(wifeWaId) === remotePhone;
+  // Robust match: Baileys peut stocker des JID (with @s.whatsapp.net) ou d'autres formes.
+  const wifeWaIdRaw = (env.wifeWaId || "").toString();
+  const wifeWaIdJid = wifeWaIdRaw.includes("@") ? wifeWaIdRaw : `${wifeWaIdRaw}@s.whatsapp.net`;
+  const normalizeDigits = (v) => v?.toString().replace(/\D/g, "") ?? "";
+  const remoteDigits = normalizeDigits(remoteJid);
+  const wifeDigits = normalizeDigits(wifeWaIdRaw);
+
+  const isWife = !!wifeWaIdRaw && (
+    remoteJid === wifeWaIdRaw || // exact match
+    remoteJid === wifeWaIdJid || // match with @s.whatsapp.net
+    (remoteDigits && wifeDigits && remoteDigits === wifeDigits) || // digits match
+    (wifeWaIdRaw && remoteJid.includes(wifeWaIdRaw)) || // partial inclusion
+    (wifeDigits && remoteJid.includes(wifeDigits)) // digits inclusion
+  );
 
   const relationshipField = existingContact?.relationship
     ? {}
@@ -415,6 +426,9 @@ export const getOrCreateSession = async (userId, io) => {
   pendingInits.set(sUserId, promise);
   return promise;
 };
+
+// Exportés pour tests/simulations
+export { handleIncomingMessage, normalizePhone };
 
 /**
  * Déconnecte proprement un utilisateur et supprime sa session MongoDB

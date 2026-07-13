@@ -208,6 +208,9 @@ export const transcribeAudio = async (audioBuffer, mimeType) => {
  * Adapte le ton selon la relation (wife, friend, family, vip, client).
  */
 export const generateReply = async (user, contact, incomingText) => {
+  if (process.env.SIMULATE_NO_AI === "1") {
+    return `(SIMULATED REPLY for ${contact.name || contact.waId || 'contact'})`;
+  }
   const history = await Message.find({ contactId: contact._id })
     .sort({ createdAt: -1 })
     .limit(HISTORY_LIMIT)
