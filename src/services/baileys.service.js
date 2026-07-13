@@ -2,19 +2,18 @@ import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
   downloadMediaMessage,
+  Browsers,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import qrcode from "qrcode";
 import pino from "pino";
 
 import { log } from "../utils/logger.js";
-import { env } from "../config/env.js";
 import User from "../models/User.js";
 import Contact from "../models/Contact.js";
 import Message from "../models/Message.js";
-import WhatsAppAuth from "../models/WhatsAppAuth.js";
 import { generateReply, transcribeAudio } from "./ai.service.js";
-import { useMongoAuthState } from "./mongoAuthState.service.js";
+import { useMongoAuthState, clearAuthState } from "./mongoAuthState.service.js";
 import { humanDelay } from "../helpers/humanDelay.js";
 
 // ─────────────────────────────────────────────
@@ -26,15 +25,12 @@ const STATUSES = {
   QR_READY: "qr_ready",
   CONNECTED: "connected",
   DISCONNECTED: "disconnected",
+  CONFLICT: "conflict",
 };
 
 const RECONNECT_DELAY_MS = 5_000;
 const PROCESSED_IDS_MAX = 500;
 
-/**
- * Types de messages système WhatsApp à ignorer silencieusement.
- * Aucune réponse ne doit être envoyée pour ces types.
- */
 const IGNORED_MESSAGE_TYPES = new Set([
   "protocolMessage",
   "reactionMessage",
@@ -47,31 +43,36 @@ const IGNORED_MESSAGE_TYPES = new Set([
 
 const silentLogger = pino({ level: "silent" });
 
+// Version Baileys figée une seule fois par process, pas re-fetchée à chaque reconnexion
+let cachedVersion = null;
+const getBaileysVersion = async () => {
+  if (!cachedVersion) {
+    const { version } = await fetchLatestBaileysVersion();
+    cachedVersion = version;
+  }
+  return cachedVersion;
+};
+
 // ─────────────────────────────────────────────
 // State interne
 // ─────────────────────────────────────────────
 
-/** userId (string) → { sock, status, qr, ownJid, processedMsgIds } */
 const sessions = new Map();
-
-/** userId (string) → Promise<session> — évite les initialisations concurrentes */
 const pendingInits = new Map();
+
+// Flag global — empêche toute reconnexion pendant un arrêt volontaire du process
+let isShuttingDown = false;
+export const setShuttingDown = () => {
+  isShuttingDown = true;
+};
 
 // ─────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────
 
-/**
- * Normalise un identifiant WhatsApp en numéro de téléphone pur (chiffres uniquement).
- * Gère les formats JID (@s.whatsapp.net), E.164 (+224…) et locaux.
- */
 const normalizePhone = (value) =>
   value?.toString().replace("@s.whatsapp.net", "").replace(/\D/g, "") ?? "";
 
-/**
- * Extrait le type de contenu utile d'un objet `message` Baileys.
- * Retourne "unsupported" si aucun type connu n'est détecté.
- */
 const getMessageType = (message) => {
   if (message.conversation != null || message.extendedTextMessage?.text != null)
     return "text";
@@ -83,9 +84,6 @@ const getMessageType = (message) => {
   return "unsupported";
 };
 
-/**
- * Vérifie si le bot est explicitement mentionné (@mention) dans un message de groupe.
- */
 const isBotMentioned = (msg, ownJid) => {
   if (!ownJid) return false;
   const contextInfo =
@@ -99,10 +97,6 @@ const isBotMentioned = (msg, ownJid) => {
   return mentioned.some((jid) => jid.split("@")[0] === ownNumber);
 };
 
-/**
- * Construit le message de repli envoyé quand le bot ne peut pas traiter un média.
- * Réservé aux cas où le bot a tenté un traitement (image sans légende, audio non transcrit).
- */
 const buildFallbackMessage = (businessName, reason) => {
   const base = `Bonjour, je suis l'assistant automatique de ${businessName}. Un membre de l'équipe vous répondra dès que possible.`;
   if (reason === "image")
@@ -115,7 +109,6 @@ const buildFallbackMessage = (businessName, reason) => {
 const handleIncomingMessage = async (sUserId, session, msg, io) => {
   if (!msg.message) return;
 
-  // 1. Ignorer les messages système WhatsApp (réactions, protocole, éphémères…)
   const msgKeys = Object.keys(msg.message);
   if (msgKeys.some((k) => IGNORED_MESSAGE_TYPES.has(k))) return;
 
@@ -124,10 +117,8 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
   const isGroup = remoteJid.endsWith("@g.us");
   const messageType = getMessageType(msg.message);
 
-  // 2. Groupes : répondre uniquement si le bot est explicitement mentionné
   if (isGroup && !isBotMentioned(msg, session.ownJid)) return;
 
-  // 3. Extraction du contenu textuel selon le type de message
   let text = "";
   let mediaFallbackReason = null;
 
@@ -162,11 +153,9 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
       mediaFallbackReason = "audio";
     }
   } else {
-    // sticker, document, type inconnu → silence total, pas de fallback
     return;
   }
 
-  // 4. Commandes de contrôle : !stop / !start (propriétaire uniquement)
   const normalized = text
     .trim()
     .toLowerCase()
@@ -184,23 +173,17 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
     return;
   }
 
-  // 5. Accusé de réception pour les messages texte du propriétaire
   if (isFromMe && messageType === "text" && text.trim()) {
     await humanDelay();
     await session.sock.sendMessage(remoteJid, { text: "✅ Reçu." });
     return;
   }
 
-  // 6. Ignorer tous les autres messages envoyés par le propriétaire
   if (isFromMe) return;
 
-  // 7. Vérifier que le bot est actif pour cet utilisateur
   const user = await User.findById(sUserId);
   if (!user?.botEnabled) return;
 
-  // 8. Trouver ou créer le contact
-  //    → Les waId sont au format @lid — comparaison par numéro impossible.
-  //    → On préserve le champ `relationship` défini manuellement.
   const pushName = msg.pushName?.trim() || null;
 
   const existingContact = await Contact.findOne({
@@ -213,13 +196,11 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
     {
       lastInteractionAt: new Date(),
       ...(pushName ? { name: pushName } : {}),
-      // Ne jamais écraser une relation définie manuellement (wife, friend, family, vip)
       ...(existingContact?.relationship ? {} : { relationship: null }),
     },
     { upsert: true, new: true },
   );
 
-  // 9. Média non exploitable → message de repli (image sans légende, audio non transcrit)
   if (mediaFallbackReason) {
     const fallback = buildFallbackMessage(
       user.businessName,
@@ -248,7 +229,6 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
 
   if (!text.trim()) return;
 
-  // 10. Générer et envoyer la réponse IA
   await Message.create({
     userId: sUserId,
     contactId: contact._id,
@@ -270,19 +250,23 @@ const handleIncomingMessage = async (sUserId, session, msg, io) => {
     contactId: contact._id,
   });
 };
+
 // ─────────────────────────────────────────────
 // Construction de session Baileys
 // ─────────────────────────────────────────────
 
 const buildSession = async (sUserId, io) => {
   const { state, saveCreds } = await useMongoAuthState(sUserId);
-  const { version } = await fetchLatestBaileysVersion();
+  const version = await getBaileysVersion();
 
   const sock = makeWASocket({
     auth: state,
     logger: silentLogger,
     printQRInTerminal: false,
     version,
+    // Fingerprint FIXE — ne jamais changer entre process/redéploiements,
+    // un fingerprint instable augmente la suspicion côté WhatsApp.
+    browser: Browsers.macOS("Chrome"),
     markOnlineOnConnect: false,
   });
 
@@ -296,10 +280,8 @@ const buildSession = async (sUserId, io) => {
 
   sessions.set(sUserId, session);
 
-  // Persistence des credentials
   sock.ev.on("creds.update", saveCreds);
 
-  // Événements de connexion
   sock.ev.on(
     "connection.update",
     async ({ connection, lastDisconnect, qr }) => {
@@ -321,6 +303,10 @@ const buildSession = async (sUserId, io) => {
       }
 
       if (connection === "close") {
+        // Arrêt volontaire du process (déploiement) — ne rien entreprendre,
+        // laisser gracefulShutdown gérer la fermeture des sockets.
+        if (isShuttingDown) return;
+
         session.status = STATUSES.DISCONNECTED;
         sessions.delete(sUserId);
 
@@ -333,7 +319,7 @@ const buildSession = async (sUserId, io) => {
         });
 
         if (statusCode === DisconnectReason.loggedOut) {
-          await WhatsAppAuth.deleteOne({ userId: sUserId });
+          await clearAuthState(sUserId);
           await log(
             "warn",
             "Session invalidée (logout) — nouveau scan QR requis",
@@ -342,25 +328,36 @@ const buildSession = async (sUserId, io) => {
           return;
         }
 
-        // Reconnexion automatique pour tout autre motif de déconnexion
+        if (statusCode === DisconnectReason.connectionReplaced) {
+          // Une autre socket tient déjà cette session — NE JAMAIS reconnecter
+          // automatiquement ici, sous peine de boucle de conflit infinie.
+          session.status = STATUSES.CONFLICT;
+          io?.to(`user:${sUserId}`).emit("wa:status", {
+            status: STATUSES.CONFLICT,
+          });
+          await log(
+            "error",
+            "Conflit détecté : session déjà active ailleurs — reconnexion annulée",
+            { userId: sUserId },
+          );
+          return;
+        }
+
+        // Tout autre motif (timeout réseau, restart requis après premier scan, etc.)
         setTimeout(() => getOrCreateSession(sUserId, io), RECONNECT_DELAY_MS);
       }
     },
   );
 
-  // Réception des messages
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    // "append" = historique de synchro au reconnect, on l'ignore
     if (type !== "notify") return;
 
     for (const msg of messages) {
-      // Dédoublonnage par msgId (évite les réponses doubles sur reconnect instable)
       const msgId = msg.key?.id;
       if (msgId) {
         if (session.processedMsgIds.has(msgId)) continue;
         session.processedMsgIds.add(msgId);
 
-        // Borne la taille du Set pour éviter une fuite mémoire sur session longue durée
         if (session.processedMsgIds.size > PROCESSED_IDS_MAX) {
           session.processedMsgIds.delete(
             session.processedMsgIds.values().next().value,
@@ -385,7 +382,6 @@ const buildSession = async (sUserId, io) => {
 // API publique
 // ─────────────────────────────────────────────
 
-/** Retourne le statut courant de la session d'un utilisateur. */
 export const getSessionStatus = (userId) => {
   const s = sessions.get(userId.toString());
   return s
@@ -393,11 +389,11 @@ export const getSessionStatus = (userId) => {
     : { status: STATUSES.DISCONNECTED, qr: null };
 };
 
-/**
- * Retourne la session existante ou en crée une nouvelle.
- * Protège contre les appels concurrents grâce à `pendingInits`.
- */
 export const getOrCreateSession = async (userId, io) => {
+  if (isShuttingDown) {
+    throw new Error("Process en cours d'arrêt, nouvelle session refusée");
+  }
+
   const sUserId = userId.toString();
   if (sessions.has(sUserId)) return sessions.get(sUserId);
   if (pendingInits.has(sUserId)) return pendingInits.get(sUserId);
@@ -410,30 +406,46 @@ export const getOrCreateSession = async (userId, io) => {
 };
 
 /**
- * Déconnecte proprement un utilisateur et supprime sa session MongoDB.
- * Équivaut à un "logout" — un nouveau scan QR sera nécessaire pour se reconnecter.
+ * Déconnecte proprement un utilisateur et supprime sa session MongoDB
+ * (creds + toutes les clés). Un nouveau scan QR sera nécessaire.
  */
 export const destroySession = async (userId) => {
   const sUserId = userId.toString();
   const session = sessions.get(sUserId);
-  if (!session) return;
 
-  try {
-    await session.sock.logout();
-  } catch {
-    /* déjà déconnecté */
+  if (session) {
+    try {
+      await session.sock.logout();
+    } catch {
+      /* déjà déconnecté */
+    }
+    sessions.delete(sUserId);
+    pendingInits.delete(sUserId);
   }
 
-  sessions.delete(sUserId);
-  pendingInits.delete(sUserId);
-  await WhatsAppAuth.deleteOne({ userId: sUserId });
+  await clearAuthState(sUserId);
   await log("info", "Session WhatsApp détruite", { userId: sUserId });
 };
 
 /**
- * Initialise les sessions de tous les utilisateurs actifs au démarrage du serveur.
- * Un délai de 1 s entre chaque init évite de saturer WhatsApp simultanément.
+ * Ferme proprement toutes les sockets actives SANS invalider les sessions
+ * (pas de logout). À utiliser uniquement lors d'un arrêt volontaire du
+ * process (SIGTERM), pour laisser le temps aux dernières écritures Mongo
+ * de se terminer avant que Railway ne tue le conteneur.
  */
+export const closeAllSessions = async () => {
+  for (const [userId, session] of sessions.entries()) {
+    try {
+      session.sock.end(undefined);
+    } catch (err) {
+      await log("warn", `Erreur fermeture socket pour ${userId} : ${err.message}`, {
+        userId,
+      });
+    }
+  }
+  await new Promise((r) => setTimeout(r, 1_500));
+};
+
 export const initAllSessions = async (users, io) => {
   for (const user of users) {
     try {

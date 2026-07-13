@@ -108,53 +108,37 @@ const generateDraftForUser = async (user) => {
  */
 const publishDuePosts = async (io) => {
   const now = new Date();
-
-  const posts = await Post.find({
+  const duePosts = await Post.find({
     status: "scheduled",
     scheduledAt: { $lte: now },
   }).populate("userId");
 
-  for (const post of posts) {
+  for (const post of duePosts) {
     const user = post.userId;
+    if (!user?.isActive || !user?.statusFeatureEnabled) continue;
 
-    // Vérifications de sécurité avant publication
-    if (!user?.isActive) continue;
-    if (!user?.statusFeatureEnabled) continue;
-
-    // Verrou optimiste : passe en "publishing" avant d'envoyer
-    // pour éviter qu'un autre cron traite le même post simultanément
-    post.status = "publishing";
-    await post.save();
+    // claim atomique : seul le process qui réussit ce findOneAndUpdate traite le post
+    const claimed = await Post.findOneAndUpdate(
+      { _id: post._id, status: "scheduled" },
+      { status: "publishing" },
+      { new: true },
+    );
+    if (!claimed) continue; // déjà pris par un autre run concurrent
 
     try {
       await publishStatusViaBaileys(
         user._id.toString(),
-        { text: post.text, imageUrl: post.imageUrl ?? null },
+        { text: claimed.text, imageUrl: claimed.imageUrl ?? null },
         io,
       );
-
-      post.status = "published";
-      post.publishedAt = new Date();
-      post.errorMessage = null;
-      await post.save();
-
-      await log("success", `Statut publié pour ${user.email}`, {
-        userId: user._id,
-        postId: post._id,
-      });
+      claimed.status = "published";
+      claimed.publishedAt = new Date();
+      claimed.errorMessage = null;
+      await claimed.save();
     } catch (err) {
-      post.status = "failed";
-      post.errorMessage = err.message;
-      await post.save();
-
-      await log(
-        "error",
-        `Publication échouée pour ${user.email} : ${err.message}`,
-        {
-          userId: user._id,
-          postId: post._id,
-        },
-      );
+      claimed.status = "failed";
+      claimed.errorMessage = err.message;
+      await claimed.save();
     }
   }
 };

@@ -12,7 +12,11 @@ import routes from "./routes/index.js";
 import { errorHandler } from "./middleware/errorHandler.middleware.js";
 import { apiLimiter } from "./middleware/rateLimiter.middleware.js";
 import User from "./models/User.js";
-import { initAllSessions } from "./services/baileys.service.js";
+import {
+  initAllSessions,
+  setShuttingDown,
+  closeAllSessions,
+} from "./services/baileys.service.js";
 import { log } from "./utils/logger.js";
 
 const app = express();
@@ -63,18 +67,25 @@ process.on("unhandledRejection", async (reason) => {
   await log("error", `Rejet non géré : ${reason}`, { details: reason?.stack });
 });
 
-// ─── Arrêt propre : laisse le temps aux écritures Mongo en cours (creds/keys
-// Baileys) de se terminer avant que Railway ne tue le process au déploiement ───
+// ─── Arrêt propre : ferme réellement les sockets WhatsApp (sans logout) et
+// laisse le temps aux écritures Mongo en cours (creds/keys Baileys) de se
+// terminer avant que Railway ne tue le process au déploiement ───
 let isShuttingDown = false;
 const gracefulShutdown = async (signal) => {
   if (isShuttingDown) return;
   isShuttingDown = true;
   await log("warn", `Signal ${signal} reçu, arrêt propre en cours…`);
+
+  // Empêche baileys.service.js de tenter une reconnexion pendant l'arrêt
+  setShuttingDown();
+
   io.close();
   httpServer.close();
-  // Laisse un court délai pour que les écritures Mongo en cours
-  // (creds.update / keys.set de Baileys) aient le temps de finir
-  await new Promise((r) => setTimeout(r, 3000));
+
+  // Ferme proprement toutes les sockets WhatsApp actives (sock.end, pas
+  // logout) et attend que les dernières écritures Mongo se terminent
+  await closeAllSessions();
+
   try {
     await mongoose.connection.close();
   } catch {}

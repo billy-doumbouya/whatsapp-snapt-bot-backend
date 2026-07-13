@@ -1,13 +1,12 @@
-import { initAuthCreds, BufferJSON } from "@whiskeysockets/baileys";
+import { initAuthCreds, BufferJSON, proto } from "@whiskeysockets/baileys";
 import WhatsAppAuth from "../models/WhatsAppAuth.js";
+import WhatsAppKey from "../models/WhatsAppKey.js";
+import { log } from "../utils/logger.js";
 
 /**
- * MongoDB/Mongoose n'accepte pas bien les "." (ni les "$") comme noms de champs
- * imbriqués. Les IDs de clés Signal générés par Baileys (session, sender-key,
- * pre-key...) contiennent très souvent des points (ex: "221xxxxxxxxx.0"),
- * ce qui faisait échouer silencieusement l'écriture Mongo pendant le
- * handshake initial après scan du QR. On encode donc chaque ID en base64url
- * avant de l'utiliser comme clé d'objet stockée, et on le décode à la lecture.
+ * MongoDB n'accepte pas bien les "." dans les noms de champs imbriqués.
+ * Les IDs de clés Signal générés par Baileys contiennent souvent des points
+ * (ex: "221xxxxxxxxx.0"). On les encode en base64url avant stockage.
  */
 const encodeId = (id) =>
   Buffer.from(id, "utf8")
@@ -23,78 +22,138 @@ const decodeId = (encoded) => {
 };
 
 export const useMongoAuthState = async (userId) => {
-  const existing = await WhatsAppAuth.findOne({ userId }).lean();
-  const storedCreds = existing?.creds
-    ? JSON.parse(JSON.stringify(existing.creds), BufferJSON.reviver)
-    : null;
-  const storedKeys = existing?.keys
-    ? JSON.parse(JSON.stringify(existing.keys), BufferJSON.reviver)
-    : {};
+  // ─────────────────────────────────────────────
+  // Étape 0 — Garantir l'existence du document creds AVANT toute écriture
+  // concurrente. Élimine la race condition d'upsert simultané qui a produit
+  // un creds vide lors du premier pairing.
+  // ─────────────────────────────────────────────
+  await WhatsAppAuth.findOneAndUpdate(
+    { userId },
+    { $setOnInsert: { userId, creds: null } },
+    { upsert: true },
+  );
 
-  const creds = storedCreds || initAuthCreds();
-  const keys = {};
-  for (const category of Object.keys(storedKeys)) {
-    keys[category] = {};
-    for (const encodedId of Object.keys(storedKeys[category])) {
-      keys[category][decodeId(encodedId)] = storedKeys[category][encodedId];
-    }
+  const existing = await WhatsAppAuth.findOne({ userId }).lean();
+
+  // Un objet vide ({}) n'est PAS un creds valide — on exige explicitement
+  // la présence de `me` et `noiseKey`, marqueurs d'un pairing réel.
+  const hasValidCreds =
+    existing?.creds &&
+    typeof existing.creds === "object" &&
+    existing.creds.noiseKey &&
+    existing.creds.signedIdentityKey;
+
+  const creds = hasValidCreds
+    ? JSON.parse(JSON.stringify(existing.creds), BufferJSON.reviver)
+    : initAuthCreds();
+
+  if (existing?.creds && !hasValidCreds) {
+    await log(
+      "warn",
+      `Creds Mongo présents mais invalides/incomplets pour ${userId} — réinitialisation forcée`,
+      { userId },
+    );
   }
 
-  const persistCreds = async () => {
+  // ─────────────────────────────────────────────
+  // Persistance des creds — jamais silencieuse en cas d'échec
+  // ─────────────────────────────────────────────
+  const saveCreds = async () => {
     const serialized = JSON.parse(JSON.stringify(creds, BufferJSON.replacer));
-    await WhatsAppAuth.findOneAndUpdate(
-      { userId },
-      { $set: { creds: serialized } }, // ← $set : ne touche que ce champ, ne remplace plus tout le document
-      { upsert: true },
-    );
-  };
-
-  const persistKeys = async () => {
-    const encodedKeys = {};
-    for (const category of Object.keys(keys)) {
-      encodedKeys[category] = {};
-      for (const id of Object.keys(keys[category])) {
-        encodedKeys[category][encodeId(id)] = keys[category][id];
-      }
+    try {
+      await WhatsAppAuth.findOneAndUpdate(
+        { userId },
+        { $set: { creds: serialized } },
+        { upsert: true },
+      );
+    } catch (err) {
+      await log(
+        "error",
+        `ÉCHEC critique de sauvegarde des creds pour ${userId} : ${err.message}`,
+        { userId },
+      );
+      throw err;
     }
-    const serialized = JSON.parse(
-      JSON.stringify(encodedKeys, BufferJSON.replacer),
-    );
-    await WhatsAppAuth.findOneAndUpdate(
-      { userId },
-      { $set: { keys: serialized } }, // ← $set : ne touche que ce champ, ne remplace plus tout le document
-      { upsert: true },
-    );
   };
 
-  return {
-    state: {
-      creds,
-      keys: {
-        get: async (type, ids) => {
-          const result = {};
-          for (const id of ids) {
-            const value = keys[type]?.[id];
-            if (value !== undefined) result[id] = value;
-          }
-          return result;
-        },
-        set: async (data) => {
-          for (const category of Object.keys(data)) {
-            keys[category] = keys[category] || {};
-            for (const id of Object.keys(data[category])) {
-              const value = data[category][id];
-              if (value === null || value === undefined) {
-                delete keys[category][id];
-              } else {
-                keys[category][id] = value;
-              }
-            }
-          }
-          await persistKeys();
-        },
-      },
+  // ─────────────────────────────────────────────
+  // Clés Signal — un document Mongo par clé, écritures indépendantes.
+  // Élimine tout risque d'écrasement entre écritures concurrentes.
+  // ─────────────────────────────────────────────
+  const keys = {
+    get: async (type, ids) => {
+      const result = {};
+      const encodedIds = ids.map(encodeId);
+
+      const docs = await WhatsAppKey.find({
+        userId,
+        category: type,
+        keyId: { $in: encodedIds },
+      }).lean();
+
+      for (const doc of docs) {
+        const id = decodeId(doc.keyId);
+        let value = JSON.parse(JSON.stringify(doc.value), BufferJSON.reviver);
+        if (type === "app-state-sync-key" && value) {
+          value = proto.Message.AppStateSyncKeyData.fromObject(value);
+        }
+        result[id] = value;
+      }
+      return result;
     },
-    saveCreds: persistCreds,
+
+    set: async (data) => {
+      const ops = [];
+
+      for (const category of Object.keys(data)) {
+        for (const id of Object.keys(data[category])) {
+          const value = data[category][id];
+          const encodedId = encodeId(id);
+
+          if (value === null || value === undefined) {
+            ops.push(
+              WhatsAppKey.deleteOne({ userId, category, keyId: encodedId }),
+            );
+          } else {
+            const serialized = JSON.parse(
+              JSON.stringify(value, BufferJSON.replacer),
+            );
+            ops.push(
+              WhatsAppKey.findOneAndUpdate(
+                { userId, category, keyId: encodedId },
+                { $set: { value: serialized } },
+                { upsert: true },
+              ),
+            );
+          }
+        }
+      }
+
+      const results = await Promise.allSettled(ops);
+      const failures = results.filter((r) => r.status === "rejected");
+      if (failures.length > 0) {
+        await log(
+          "error",
+          `${failures.length} écriture(s) de clé(s) échouée(s) pour ${userId}`,
+          { userId, errors: failures.map((f) => f.reason?.message) },
+        );
+      }
+    },
   };
+
+  return { state: { creds, keys }, saveCreds };
+};
+
+/**
+ * Supprime intégralement la session d'un utilisateur (creds + toutes les clés).
+ * À utiliser sur logout explicite (401) ou reset manuel.
+ */
+export const clearAuthState = async (userId) => {
+  await Promise.all([
+    WhatsAppAuth.deleteOne({ userId }),
+    WhatsAppKey.deleteMany({ userId }),
+  ]);
+  await log("info", `Session Mongo entièrement effacée pour ${userId}`, {
+    userId,
+  });
 };
